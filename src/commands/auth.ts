@@ -3,6 +3,9 @@ import open from "open";
 import {api} from "../utils/api.js";
 import {clearConfig, saveConfig} from "../utils/config.js";
 
+const POLL_INTERVAL = 3000;
+const POLL_TIMEOUT = 5 * 60 * 1000;
+
 export const authCommand = new Command("auth")
     .description("Authentication commands");
 
@@ -12,57 +15,49 @@ authCommand
     .description("Login via browser")
     .action(async () => {
         try {
-            console.log("🔐 Starting login...");
+            const {data: init} = await api.post("/cli-login/init");
+            if (!init.success) throw new Error(init.message);
 
-            const {data} = await api.post("/auth/device");
+            const {device_code, login_url} = init;
 
-            const {device_code, verification_url, user_code, interval} = data;
-
-            const safeUrl = encodeURI(verification_url);
-            const safeCode = String(user_code).replace(/[^\w-]/g, "");
-
-            console.log("\n👉 Please log in via your browser:");
-            console.log(safeUrl);
-            console.log(`Code: ${safeCode}\n`);
-
-            await open(safeUrl);
-
+            console.log(`\n🔗 Opening browser to login...`);
+            console.log(`   ${login_url}\n`);
             console.log("⏳ Waiting for authentication...");
 
-            let tokenData = null;
-            let attempts = 0;
-            const MAX_ATTEMPTS = 60;
+            await open(login_url);
 
-            while (!tokenData && attempts < MAX_ATTEMPTS) {
-                attempts++;
-                await new Promise((r) => setTimeout(r, interval * 1000));
-
-                try {
-                    const res = await api.post("/auth/device/token", {device_code});
-                    tokenData = res.data;
-                } catch (err: any) {
-                    if (err.response?.data?.error === "authorization_pending") {
-                        process.stdout.write(".");
-                        continue;
-                    } else {
-                        throw err;
-                    }
-                }
-            }
-
-            if (!tokenData) throw new Error("Login timeout. Please try again.");
+            const token = await pollForToken(device_code);
 
             await saveConfig({
-                access_token: tokenData.access_token,
-                refresh_token: tokenData.refresh_token,
-                expires_at: Date.now() + tokenData.expires_in * 1000
+                access_token: token.access_token,
+                refresh_token: token.refresh_token
             });
 
             console.log("\n✅ Login successful!");
         } catch (err: any) {
             console.error("❌ Login failed:", err.message);
+            process.exit(1);
         }
     });
+
+async function pollForToken(device_code: string): Promise<{access_token: string; refresh_token: string}> {
+    const deadline = Date.now() + POLL_TIMEOUT;
+
+    while (Date.now() < deadline) {
+        await sleep(POLL_INTERVAL);
+
+        const {data} = await api.get("/cli-login/poll", {params: {device_code}});
+
+        if (data.status === "completed") return data;
+        if (data.status === "expired") throw new Error("Login session expired");
+    }
+
+    throw new Error("Login timed out");
+}
+
+function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // ✅ LOGOUT
 authCommand

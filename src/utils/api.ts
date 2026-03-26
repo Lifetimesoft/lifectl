@@ -8,7 +8,7 @@ export const api = axios.create({
     timeout: 10000
 });
 
-// 🔁 interceptor ใส่ token
+// 🔁 interceptor token
 api.interceptors.request.use(async (config) => {
     const cfg = await getConfig();
 
