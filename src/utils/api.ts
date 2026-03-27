@@ -32,7 +32,7 @@ api.interceptors.response.use(
 
             if (!cfg?.refresh_token) throw error;
 
-            const res = await axios.post(`${BASE_URL}/auth/refresh`, {
+            const res = await axios.post(`${BASE_URL}/cli-login/refresh`, {
                 refresh_token: cfg.refresh_token
             }, {
                 headers: {"X-Requested-With": "lifectl-cli"}
