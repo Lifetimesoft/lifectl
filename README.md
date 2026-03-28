@@ -35,19 +35,7 @@ lifectl auth login
 
 ---
 
-### Pull an agent
-
-```bash
-lifectl pull pantip-commenter
-```
-
----
-
-### Run agent
-
-```bash
-lifectl run pantip-commenter
-```
+> ⚠️ `pull` and `run` commands are not yet available. See [Roadmap](#-roadmap).
 
 ---
 
