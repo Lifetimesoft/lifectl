@@ -1,19 +1,39 @@
 {
-    "name": "lifectl",
+    "name": "@lifetimesoft/lifectl",
     "version": "0.0.1",
+    "description": "CLI tool for pulling, running, and managing AI agents",
     "bin": {
         "lifectl": "dist/index.js"
     },
-    "description": "",
-    "main": "index.js",
+    "publishConfig": {
+        "access": "public"
+    },
+    "main": "dist/index.js",
+    "files": [
+        "dist/"
+    ],
+    "engines": {
+        "node": ">=18"
+    },
     "scripts": {
         "build": "tsc",
         "dev": "tsc --watch",
-        "start": "node dist/index.js"
+        "start": "node dist/index.js",
+        "prepublishOnly": "npm run build"
     },
-    "keywords": [],
-    "author": "",
-    "license": "ISC",
+    "keywords": [
+        "cli",
+        "ai",
+        "agent",
+        "automation"
+    ],
+    "author": "LifetimeSoft",
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/lifetimesoft/lifectl.git"
+    },
+    "homepage": "https://github.com/lifetimesoft/lifectl#readme",
     "type": "module",
     "dependencies": {
         "axios": "^1.13.6",

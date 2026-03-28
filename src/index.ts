@@ -2,13 +2,17 @@
 
 import {Command} from "commander";
 import {authCommand} from "./commands/auth.js";
+import {createRequire} from "module";
+
+const require = createRequire(import.meta.url);
+const {version} = require("../package.json");
 
 const program = new Command();
 
 program
     .name("lifectl")
     .description("LifetimeSoft CLI")
-    .version("0.1.0");
+    .version(`lifectl v${version} (LifetimeSoft)`);
 
 program.addCommand(authCommand);
 
