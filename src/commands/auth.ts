@@ -98,6 +98,12 @@ authCommand
     .command("logout")
     .description("Logout")
     .action(async () => {
+        const cfg = await getConfig();
+        if (cfg?.refresh_token) {
+            try {
+                await api.post("/cli-logout", {refresh_token: cfg.refresh_token});
+            } catch {}
+        }
         await clearConfig();
         console.log("👋 Logged out");
     });
