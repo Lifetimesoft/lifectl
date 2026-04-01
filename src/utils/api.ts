@@ -1,7 +1,7 @@
 import axios from "axios";
 import {getConfig, saveConfig} from "./config.js";
 
-const BASE_URL = "https://app.lifetimesoft.com/ex-api";
+const BASE_URL = "https://app.lifetimesoft.com";
 
 export const api = axios.create({
     baseURL: BASE_URL,

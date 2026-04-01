@@ -28,7 +28,7 @@ authCommand
                 }
             }
 
-            const {data: init} = await api.post("/cli-login/init");
+            const {data: init} = await api.post("/ex-api/cli-login/init");
             if (!init.success) throw new Error(init.message);
 
             const {device_code, login_url} = init;
@@ -59,7 +59,7 @@ async function pollForToken(device_code: string): Promise<{ access_token: string
     while (Date.now() < deadline) {
         await sleep(POLL_INTERVAL);
 
-        const {data} = await api.get("/cli-login/poll", {params: {device_code}});
+        const {data} = await api.get("/ex-api/cli-login/poll", {params: {device_code}});
 
         if (data.status === "completed") return data;
         if (data.status === "expired") throw new Error("Login session expired");
@@ -84,7 +84,7 @@ function isTokenExpired(token: string): boolean {
 async function tryRefresh(refreshToken: string): Promise<boolean> {
     try {
         const cfg = await getConfig();
-        const res = await api.post("/cli-login/refresh", {refresh_token: refreshToken, access_token: cfg?.access_token});
+        const res = await api.post("/ex-api/cli-login/refresh", {refresh_token: refreshToken, access_token: cfg?.access_token});
         if (!res.data.success) return false;
         await saveConfig({...cfg, access_token: res.data.access_token, refresh_token: res.data.refresh_token ?? refreshToken});
         return true;
@@ -101,8 +101,9 @@ authCommand
         const cfg = await getConfig();
         if (cfg?.refresh_token) {
             try {
-                await api.post("/cli-logout", {refresh_token: cfg.refresh_token});
-            } catch {}
+                await api.post("/ex-api/cli-logout", {refresh_token: cfg.refresh_token});
+            } catch {
+            }
         }
         await clearConfig();
         console.log("👋 Logged out");
