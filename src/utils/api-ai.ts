@@ -1,26 +1,26 @@
 import axios from "axios";
 import {getConfig, saveConfig} from "./config.js";
 
-const BASE_URL = "https://app.lifetimesoft.com";
+const BASE_URL = "https://app.lifetimesoft.com/cli/ai-account-management";
 
-export const api = axios.create({
+export const apiAi = axios.create({
     baseURL: BASE_URL,
     timeout: 10000
 });
 
 // 🔁 interceptor token
-api.interceptors.request.use(async (config) => {
+apiAi.interceptors.request.use(async (config) => {
     const cfg = await getConfig();
 
     if (cfg?.access_token) {
-        config.headers.Authorization = `Bearer ${cfg.access_token}`;
+        config.headers.Authorization = `${cfg.access_token}`;
     }
 
     return config;
 });
 
 // 🔁 refresh token
-api.interceptors.response.use(
+apiAi.interceptors.response.use(
     (res) => res,
     async (error) => {
         const original = error.config;
@@ -48,7 +48,7 @@ api.interceptors.response.use(
 
             original.headers.Authorization = `Bearer ${newCfg.access_token}`;
 
-            return api(original);
+            return apiAi(original);
         }
 
         throw error;

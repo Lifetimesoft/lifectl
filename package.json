@@ -36,6 +36,8 @@
     "homepage": "https://github.com/lifetimesoft/lifectl#readme",
     "type": "module",
     "dependencies": {
+        "@types/archiver": "^7.0.0",
+        "archiver": "^7.0.1",
         "axios": "^1.13.6",
         "commander": "^14.0.3",
         "fs-extra": "^11.3.4",

@@ -3,7 +3,8 @@ import {execSync, spawn} from "child_process";
 import fs from "fs-extra";
 import path from "path";
 import os from "os";
-import {api} from "../utils/api.js";
+import archiver from "archiver";
+import {apiAi} from "../utils/api-ai.js";
 
 const AGENTS_DIR = path.join(os.homedir(), ".lifectl", "agents");
 
@@ -11,33 +12,60 @@ export const aiCommand = new Command("ai").description("AI agent commands");
 
 const agentCommand = new Command("agent").description("Manage AI agents");
 
+async function zipDirectory(sourceDir: string, outPath: string): Promise<void> {
+    const ignoreFile = path.join(sourceDir, ".agentignore");
+    const ignore = ["*.zip", ".agentignore"];
+    if (await fs.pathExists(ignoreFile)) {
+        const lines = (await fs.readFile(ignoreFile, "utf-8")).split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+        ignore.push(...lines);
+    }
+    return new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(outPath);
+        const archive = archiver("zip", {zlib: {level: 9}});
+        output.on("close", resolve);
+        archive.on("error", reject);
+        archive.pipe(output);
+        archive.glob("**/*", {cwd: sourceDir, ignore});
+        archive.finalize();
+    });
+}
+
 // push
 agentCommand
     .command("push")
     .description("Push agent to registry")
     .action(async () => {
+        const tmpDir = path.join(os.tmpdir(), "lifetimesoft");
+        await fs.ensureDir(tmpDir);
+        const zipPath = path.join(tmpDir, `agent-${Date.now()}.zip`);
         try {
             const agentJson = path.join(process.cwd(), "agent.json");
             if (!await fs.pathExists(agentJson)) throw new Error("agent.json not found");
 
             const agent = await fs.readJson(agentJson);
-            const files: Record<string, string> = {};
 
-            const entries = await fs.readdir(process.cwd());
-            for (const entry of entries) {
-                const stat = await fs.stat(path.join(process.cwd(), entry));
-                if (stat.isFile()) {
-                    files[entry] = await fs.readFile(path.join(process.cwd(), entry), "utf-8");
-                }
+            console.log("📦 Zipping agent...");
+            await zipDirectory(process.cwd(), zipPath);
+
+            const zipBuffer = await fs.readFile(zipPath);
+            const {data} = await apiAi.post("/agents/push", zipBuffer, {
+                headers: {
+                    "Content-Type": "application/zip",
+                    "X-Agent-Name": agent.name,
+                    "X-Agent-Version": agent.version,
+                },
+            });
+            if (!data.success) {
+                console.error("❌ Push failed:", data);
+                throw new Error(data.message);
             }
-
-            const {data} = await api.post("/agents/push", {agent, files});
-            if (!data.success) throw new Error(data.message);
 
             console.log(`✅ Pushed ${agent.name}@${agent.version}`);
         } catch (err: any) {
             console.error("❌ Push failed:", err.message);
             process.exit(1);
+        } finally {
+            // await fs.remove(zipPath);
         }
     });
 
@@ -47,7 +75,7 @@ agentCommand
     .description("Pull agent from registry")
     .action(async (name: string) => {
         try {
-            const {data} = await api.get(`/agents/pull/${name}`);
+            const {data} = await apiAi.get(`/agents/pull/${name}`);
             if (!data.success) throw new Error(data.message);
 
             const agentDir = path.join(AGENTS_DIR, name);
@@ -112,7 +140,8 @@ agentCommand
                 const pid = parseInt(await fs.readFile(pidFile, "utf-8"));
                 try {
                     process.kill(pid);
-                } catch {}
+                } catch {
+                }
                 await fs.remove(pidFile);
                 console.log(`✅ Agent '${name}' stopped`);
                 return;
