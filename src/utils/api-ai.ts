@@ -1,5 +1,6 @@
 import axios from "axios";
 import {getConfig, saveConfig} from "./config.js";
+import {APP_URL} from "./api.js";
 
 const BASE_URL = "https://app.lifetimesoft.com/cli/ai-account-management";
 
@@ -21,36 +22,43 @@ apiAi.interceptors.request.use(async (config) => {
 
 // 🔁 refresh token
 apiAi.interceptors.response.use(
-    (res) => res,
-    async (error) => {
-        const original = error.config;
-
-        if (error.response?.status === 401 && !original._retry) {
-            original._retry = true;
-
+    async (res) => {
+        if (res.data?.code === 401) {
             const cfg = await getConfig();
 
-            if (!cfg?.refresh_token) throw error;
+            if (!cfg?.refresh_token) {
+                return Promise.reject(new Error("Unauthorized"));
+            }
 
-            const res = await axios.post(`${BASE_URL}/cli-login/refresh`, {
+            console.log('start call refresh token...')
+            const refreshRes = await axios.post(`${APP_URL}/cli-login/refresh`, {
+                access_token: cfg.access_token,
                 refresh_token: cfg.refresh_token
             }, {
-                headers: {"X-Requested-With": "lifectl-cli"}
+                headers: {
+                    "X-Requested-With": "lifectl-cli"
+                }
             });
 
-            const newCfg = {
-                ...cfg,
-                access_token: res.data.access_token,
-                expires_at: Date.now() + res.data.expires_in * 1000
-            };
+            console.log('end call refresh token...')
+            let accessToken = refreshRes.data.access_token
 
-            await saveConfig(newCfg);
+            await saveConfig({
+                access_token: accessToken,
+                refresh_token: refreshRes.data.refresh_token
+            });
 
-            original.headers.Authorization = `Bearer ${newCfg.access_token}`;
+            res.config.headers.Authorization = `${accessToken}`;
 
-            return apiAi(original);
+            console.log('call apiAi...')
+            return apiAi(res.config);
         }
 
-        throw error;
-    }
+        if (res.data?.success === false) {
+            return Promise.reject(new Error(res.data.message || "Request failed"));
+        }
+
+        return res;
+    },
+    (error) => Promise.reject(error)
 );

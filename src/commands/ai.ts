@@ -65,7 +65,7 @@ agentCommand
             console.error("❌ Push failed:", err.message);
             process.exit(1);
         } finally {
-            // await fs.remove(zipPath);
+            await fs.remove(zipPath);
         }
     });
 
