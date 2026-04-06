@@ -48,6 +48,7 @@ agentCommand
                     "Content-Type": "application/gzip",
                     "X-Agent-Name": agent.name,
                     "X-Agent-Version": agent.version,
+                    "X-Agent-Meta": Buffer.from(JSON.stringify(agent)).toString("base64"),
                 },
             });
             if (!data.success) {
@@ -74,7 +75,8 @@ agentCommand
             const response = await apiAi.post(`/agents/pull`, {name}, {responseType: "arraybuffer"});
             await fs.writeFile(tmpFile, Buffer.from(response.data));
 
-            const agentDir = path.join(AGENTS_DIR, name);
+            const agentVersion = response.headers["x-agent-version"] ?? "unknown";
+            const agentDir = path.join(AGENTS_DIR, name, agentVersion);
             await fs.ensureDir(agentDir);
             await tar.extract({file: tmpFile, cwd: agentDir});
 
