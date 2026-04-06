@@ -23,7 +23,18 @@ apiAi.interceptors.request.use(async (config) => {
 // 🔁 refresh token
 apiAi.interceptors.response.use(
     async (res) => {
-        if (res.data?.code === 401) {
+        let data = res.data;
+
+        if (res.config.responseType === "arraybuffer" && Buffer.isBuffer(data)) {
+            try {
+                data = JSON.parse(data.toString("utf-8"));
+                console.log('parse arraybuffer: ', data)
+            } catch {
+                return res;
+            }
+        }
+
+        if (data?.code === 401) {
             const cfg = await getConfig();
 
             if (!cfg?.refresh_token) {
@@ -52,13 +63,17 @@ apiAi.interceptors.response.use(
 
             console.log('call apiAi...')
             return apiAi(res.config);
+        } else {
         }
 
-        if (res.data?.success === false) {
-            return Promise.reject(new Error(res.data.message || "Request failed"));
+        if (data?.success === false) {
+            return Promise.reject(new Error(data.message || "Request failed"));
         }
 
         return res;
     },
-    (error) => Promise.reject(error)
+    (error) => {
+        console.error(error)
+        return Promise.reject(error)
+    }
 );

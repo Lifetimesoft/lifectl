@@ -3,7 +3,7 @@ import {execSync, spawn} from "child_process";
 import fs from "fs-extra";
 import path from "path";
 import os from "os";
-import archiver from "archiver";
+import * as tar from "tar";
 import {apiAi} from "../utils/api-ai.js";
 
 const AGENTS_DIR = path.join(os.homedir(), ".lifectl", "agents");
@@ -12,22 +12,15 @@ export const aiCommand = new Command("ai").description("AI agent commands");
 
 const agentCommand = new Command("agent").description("Manage AI agents");
 
-async function zipDirectory(sourceDir: string, outPath: string): Promise<void> {
+async function tarDirectory(sourceDir: string, outPath: string): Promise<void> {
     const ignoreFile = path.join(sourceDir, ".agentignore");
-    const ignore = ["*.zip", ".agentignore"];
+    const ignore = ["*.tar.gz", ".agentignore"];
     if (await fs.pathExists(ignoreFile)) {
         const lines = (await fs.readFile(ignoreFile, "utf-8")).split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
         ignore.push(...lines);
     }
-    return new Promise((resolve, reject) => {
-        const output = fs.createWriteStream(outPath);
-        const archive = archiver("zip", {zlib: {level: 9}});
-        output.on("close", resolve);
-        archive.on("error", reject);
-        archive.pipe(output);
-        archive.glob("**/*", {cwd: sourceDir, ignore});
-        archive.finalize();
-    });
+    const entries = (await fs.readdir(sourceDir)).filter(f => !ignore.includes(f));
+    await tar.create({gzip: true, file: outPath, cwd: sourceDir}, entries);
 }
 
 // push
@@ -37,20 +30,22 @@ agentCommand
     .action(async () => {
         const tmpDir = path.join(os.tmpdir(), "lifetimesoft");
         await fs.ensureDir(tmpDir);
-        const zipPath = path.join(tmpDir, `agent-${Date.now()}.zip`);
+        const zipPath = path.join(tmpDir, `agent-${Date.now()}.tar.gz`);
         try {
             const agentJson = path.join(process.cwd(), "agent.json");
-            if (!await fs.pathExists(agentJson)) throw new Error("agent.json not found");
+            if (!await fs.pathExists(agentJson)) {
+                throw new Error("agent.json not found");
+            }
 
             const agent = await fs.readJson(agentJson);
 
-            console.log("📦 Zipping agent...");
-            await zipDirectory(process.cwd(), zipPath);
+            console.log("📦 Packing agent...");
+            await tarDirectory(process.cwd(), zipPath);
 
             const zipBuffer = await fs.readFile(zipPath);
             const {data} = await apiAi.post("/agents/push", zipBuffer, {
                 headers: {
-                    "Content-Type": "application/zip",
+                    "Content-Type": "application/gzip",
                     "X-Agent-Name": agent.name,
                     "X-Agent-Version": agent.version,
                 },
@@ -74,21 +69,21 @@ agentCommand
     .command("pull <name>")
     .description("Pull agent from registry")
     .action(async (name: string) => {
+        const tmpFile = path.join(os.tmpdir(), `agent-${Date.now()}.tar.gz`);
         try {
-            const {data} = await apiAi.get(`/agents/pull/${name}`);
-            if (!data.success) throw new Error(data.message);
+            const response = await apiAi.post(`/agents/pull`, {name}, {responseType: "arraybuffer"});
+            await fs.writeFile(tmpFile, Buffer.from(response.data));
 
             const agentDir = path.join(AGENTS_DIR, name);
             await fs.ensureDir(agentDir);
+            await tar.extract({file: tmpFile, cwd: agentDir});
 
-            for (const [filename, content] of Object.entries(data.files as Record<string, string>)) {
-                await fs.writeFile(path.join(agentDir, filename), content);
-            }
-
-            console.log(`✅ Pulled ${name} to ${agentDir}`);
+            console.log(`✅ Pulled ${name} success`);
         } catch (err: any) {
             console.error("❌ Pull failed:", err.message);
             process.exit(1);
+        } finally {
+            await fs.remove(tmpFile);
         }
     });
 
