@@ -65,6 +65,37 @@ agentCommand
         }
     });
 
+async function loadRegistry(): Promise<Record<string, any>> {
+    const registryFile = path.join(AGENTS_DIR, "registry.json");
+    if (await fs.pathExists(registryFile)) {
+        return await fs.readJson(registryFile);
+    }
+    // fallback: rebuild from agent.json in each folder
+    const registry: Record<string, any> = {};
+    if (!await fs.pathExists(AGENTS_DIR)) return registry;
+    for (const agentName of await fs.readdir(AGENTS_DIR)) {
+        const agentNameDir = path.join(AGENTS_DIR, agentName);
+        if (!(await fs.stat(agentNameDir)).isDirectory()) continue;
+        const versions = await fs.readdir(agentNameDir);
+        const sorted = versions.sort();
+        const latest = sorted[sorted.length - 1];
+        if (!latest) continue;
+        const agentJson = path.join(agentNameDir, latest, "agent.json");
+        if (!await fs.pathExists(agentJson)) continue;
+        const agent = await fs.readJson(agentJson);
+        registry[agentName] = {
+            name: agent.name ?? agentName,
+            version: agent.version ?? latest,
+            description: agent.description ?? "",
+            runtime: agent.runtime ?? "",
+            installed: false,
+            pulledAt: Date.now(),
+        };
+    }
+    await fs.writeJson(registryFile, registry, {spaces: 2});
+    return registry;
+}
+
 // pull
 agentCommand
     .command("pull <name>")
@@ -80,7 +111,22 @@ agentCommand
             await fs.ensureDir(agentDir);
             await tar.extract({file: tmpFile, cwd: agentDir});
 
-            console.log(`✅ Pulled ${name} success`);
+            const agentJson = path.join(agentDir, "agent.json");
+            const agent = await fs.pathExists(agentJson) ? await fs.readJson(agentJson) : {};
+
+            const registryFile = path.join(AGENTS_DIR, "registry.json");
+            const registry = await fs.pathExists(registryFile) ? await fs.readJson(registryFile) : {};
+            registry[name] = {
+                name: agent.name ?? name,
+                version: agent.version ?? agentVersion,
+                description: agent.description ?? "",
+                runtime: agent.runtime ?? "",
+                installed: false,
+                pulledAt: Date.now(),
+            };
+            await fs.writeJson(registryFile, registry, {spaces: 2});
+
+            console.log(`✅ Pulled ${name}@${agentVersion}`);
         } catch (err: any) {
             console.error("❌ Pull failed:", err.message);
             process.exit(1);
@@ -164,22 +210,49 @@ agentCommand
     .command("list")
     .description("List installed agents")
     .action(async () => {
-        if (!await fs.pathExists(AGENTS_DIR)) {
+        const registry = await loadRegistry();
+        const entries = Object.values(registry) as any[];
+        if (entries.length === 0) {
             console.log("No agents installed.");
             return;
         }
-        const agents = await fs.readdir(AGENTS_DIR);
-        if (agents.length === 0) {
-            console.log("No agents installed.");
-            return;
-        }
-        console.log("Installed agents:\n");
-        for (const name of agents) {
-            const agentJson = path.join(AGENTS_DIR, name, "agent.json");
-            const pidFile = path.join(AGENTS_DIR, name, "agent.pid");
-            const version = await fs.pathExists(agentJson) ? (await fs.readJson(agentJson)).version ?? "-" : "-";
-            const running = await fs.pathExists(pidFile) ? "🟢 running" : "⚪ stopped";
-            console.log(`  ${running}  ${name}@${version}`);
+
+        const formatDate = (ts: number) => {
+            const d = new Date(ts);
+            const dd = String(d.getDate()).padStart(2, "0");
+            const mm = String(d.getMonth() + 1).padStart(2, "0");
+            const yyyy = d.getFullYear();
+            const hh = String(d.getHours()).padStart(2, "0");
+            const min = String(d.getMinutes()).padStart(2, "0");
+            return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+        };
+
+        const rows = await Promise.all(entries.map(async (entry) => {
+            const pidFile = path.join(AGENTS_DIR, entry.name, entry.version, "agent.pid");
+            const status = await fs.pathExists(pidFile) ? "running" : "stopped";
+            return {
+                status,
+                name: entry.name ?? "-",
+                version: entry.version ?? "-",
+                runtime: entry.runtime ?? "-",
+                installed: entry.installed ? "yes" : "no",
+                pulledAt: formatDate(entry.pulledAt),
+            };
+        }));
+
+        const pad = (s: string, n: number) => s.padEnd(n);
+        const w = {
+            status: Math.max(6, ...rows.map(r => r.status.length)) + 2, // +2 for emoji
+            name: Math.max(4, ...rows.map(r => r.name.length)),
+            version: Math.max(7, ...rows.map(r => r.version.length)),
+            runtime: Math.max(7, ...rows.map(r => r.runtime.length)),
+            installed: Math.max(9, ...rows.map(r => r.installed.length)),
+        };
+
+        console.log(`${pad("STATUS", w.status)}  ${pad("NAME", w.name)}  ${pad("VERSION", w.version)}  ${pad("RUNTIME", w.runtime)}  ${pad("INSTALLED", w.installed)}  PULLED AT`);
+        for (const r of rows) {
+            const statusLabel = r.status === "running" ? "🟢 running" : "⚫ stopped";
+            console.log(`${pad(statusLabel, w.status)}  ${pad(r.name, w.name)}  ${pad(r.version, w.version)}  ${pad(r.runtime, w.runtime)}  ${pad(r.installed, w.installed)}  ${r.pulledAt}`);
         }
     });
 
