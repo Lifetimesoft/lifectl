@@ -2,6 +2,7 @@
 
 import {Command} from "commander";
 import {authCommand} from "./commands/auth.js";
+import {aiCommand} from "./commands/ai.js";
 import {createRequire} from "module";
 
 const require = createRequire(import.meta.url);
@@ -15,5 +16,6 @@ program
     .version(`lifectl v${version} (LifetimeSoft)`);
 
 program.addCommand(authCommand);
+program.addCommand(aiCommand);
 
 program.parse();
