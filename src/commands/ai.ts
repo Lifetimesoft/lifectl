@@ -157,4 +157,28 @@ agentCommand
         }
     });
 
+// list
+agentCommand
+    .command("list")
+    .description("List installed agents")
+    .action(async () => {
+        if (!await fs.pathExists(AGENTS_DIR)) {
+            console.log("No agents installed.");
+            return;
+        }
+        const agents = await fs.readdir(AGENTS_DIR);
+        if (agents.length === 0) {
+            console.log("No agents installed.");
+            return;
+        }
+        console.log("Installed agents:\n");
+        for (const name of agents) {
+            const agentJson = path.join(AGENTS_DIR, name, "agent.json");
+            const pidFile = path.join(AGENTS_DIR, name, "agent.pid");
+            const version = await fs.pathExists(agentJson) ? (await fs.readJson(agentJson)).version ?? "-" : "-";
+            const running = await fs.pathExists(pidFile) ? "🟢 running" : "⚪ stopped";
+            console.log(`  ${running}  ${name}@${version}`);
+        }
+    });
+
 aiCommand.addCommand(agentCommand);
