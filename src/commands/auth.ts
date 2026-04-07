@@ -1,6 +1,6 @@
 import {Command} from "commander";
 import open from "open";
-import {api} from "../utils/api.js";
+import {api} from "../utils/api-auth.js";
 import {clearConfig, getConfig, saveConfig} from "../utils/config.js";
 
 const POLL_INTERVAL = 3000;
@@ -102,7 +102,8 @@ authCommand
         if (cfg?.refresh_token) {
             try {
                 await api.post("/cli-logout", {refresh_token: cfg.refresh_token});
-            } catch {}
+            } catch {
+            }
         }
         await clearConfig();
         console.log("👋 Logged out");

@@ -27,56 +27,31 @@ npm install -g lifectl
 
 ---
 
-### Login
-
-```bash
-lifectl auth login
-```
-
----
-
-> ⚠️ `pull` and `run` commands are not yet available. See [Roadmap](#-roadmap).
-
----
-
 ## 📚 Commands
+
+### Auth
 
 ```bash
 lifectl auth login       # Login via browser
 lifectl auth logout      # Logout
-
-lifectl pull <agent>     # Download agent
-lifectl run <agent>      # Run agent
-lifectl stop <agent>     # Stop agent
-
-lifectl ps               # List running agents
-lifectl list             # List installed agents
-lifectl rm <agent>       # Remove agent
-
-lifectl push <agent>     # Publish agent (coming soon)
-lifectl help             # Show help
 ```
 
----
+### AI Agent
 
-## 🧠 What is an Agent?
+```bash
+lifectl ai agent pull <name>   # Pull agent from registry
+lifectl ai agent push          # Push agent to registry
+lifectl ai agent start <name>  # Start an agent
+lifectl ai agent stop <name>   # Stop an agent
+lifectl ai agent list          # List installed agents
+```
 
-An **Agent** is a self-contained unit of code that can:
+#### Example output of `list`
 
-* Receive input
-* Use tools (AI, browser, API, etc.)
-* Execute tasks automatically
-
-Example:
-
-```js
-export default async function run(ctx) {
-    const result = await ctx.llm.generate({
-        prompt: "Write a comment about Bitcoin"
-    });
-
-    await ctx.browser.postComment(result);
-}
+```
+STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
+🟢 running  hello-world-agent  1.0.0    node     no         06/04/2026 20:09
+⚫ stopped  my-other-agent     2.1.0    python   no         05/04/2026 15:30
 ```
 
 ---
@@ -94,10 +69,12 @@ export default async function run(ctx) {
 
 * [x] CLI foundation
 * [x] Authentication (device flow)
-* [ ] Agent pull system
+* [x] Agent registry (push/publish)
+* [x] Agent pull system
+* [x] Versioned agents
+* [x] Local agent registry (registry.json)
 * [ ] Agent runtime (local execution)
 * [ ] Agent process manager
-* [ ] Agent registry (push/publish)
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
 
@@ -127,7 +104,7 @@ Contributions are welcome!
 git clone https://github.com/lifetimesoft/lifectl
 cd lifectl
 npm install
-npm run dev
+npm run build
 ```
 
 ---
