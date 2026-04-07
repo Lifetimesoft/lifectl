@@ -49,10 +49,9 @@ lifectl ai agent list          # List installed agents
 #### Example output of `list`
 
 ```
-Installed agents:
-
-  🟢 running  hello-world-agent@1.0.0
-  ⚫ stopped  my-other-agent@2.1.0
+STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
+🟢 running  hello-world-agent  1.0.0    node     no         06/04/2026 20:09
+⚫ stopped  my-other-agent     2.1.0    python   no         05/04/2026 15:30
 ```
 
 ---
@@ -72,6 +71,8 @@ Installed agents:
 * [x] Authentication (device flow)
 * [x] Agent registry (push/publish)
 * [x] Agent pull system
+* [x] Versioned agents
+* [x] Local agent registry (registry.json)
 * [ ] Agent runtime (local execution)
 * [ ] Agent process manager
 * [ ] SaaS dashboard integration
