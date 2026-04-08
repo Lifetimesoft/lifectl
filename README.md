@@ -13,7 +13,7 @@
 * 🧠 Plug-and-play agent system
 * 🔐 Secure authentication via SaaS
 * ⚡ Lightweight and fast
-* 🔄 Versioned agents (coming soon)
+* 🔄 Versioned agents
 
 ---
 
@@ -39,11 +39,13 @@ lifectl auth logout      # Logout
 ### AI Agent
 
 ```bash
-lifectl ai agent pull <name>   # Pull agent from registry
-lifectl ai agent push          # Push agent to registry
-lifectl ai agent start <name>  # Start an agent
-lifectl ai agent stop <name>   # Stop an agent
-lifectl ai agent list          # List installed agents
+lifectl ai agent pull <name>          # Pull agent from registry
+lifectl ai agent push                 # Push agent to registry
+lifectl ai agent start <name>         # Start latest version
+lifectl ai agent start <name>:<ver>   # Start specific version
+lifectl ai agent stop <name>          # Stop latest version
+lifectl ai agent stop <name>:<ver>    # Stop specific version
+lifectl ai agent list                 # List installed agents
 ```
 
 #### Example output of `list`
@@ -52,6 +54,14 @@ lifectl ai agent list          # List installed agents
 STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
 🟢 running  hello-world-agent  1.0.0    node     no         06/04/2026 20:09
 ⚫ stopped  my-other-agent     2.1.0    python   no         05/04/2026 15:30
+```
+
+#### Allowed runtimes
+
+Agents can only use these runtimes in `agent.json` scripts:
+
+```
+node  python  python3  deno  bun
 ```
 
 ---
@@ -73,10 +83,13 @@ STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
 * [x] Agent pull system
 * [x] Versioned agents
 * [x] Local agent registry (registry.json)
-* [ ] Agent runtime (local execution)
-* [ ] Agent process manager
+* [x] Agent runtime (local execution)
+* [x] Agent process manager (PID-based)
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
+* [ ] Show logs when starting agent
+* [ ] Agent environment variables support
+* [ ] Run agent on sandbox
 
 ---
 
@@ -84,7 +97,10 @@ STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
 
 * Token-based authentication
 * No credentials stored in plain text
-* Sandboxed agent execution (planned)
+* Runtime whitelist — only `node`, `python`, `python3`, `deno`, `bun` are allowed
+* Shell metacharacter blocking — `;`, `&`, `|`, `` ` ``, `$`, `<`, `>`
+* Path traversal protection — agents are isolated under `~/.lifectl/agents/`
+* PID validation before kill — prevents stale or invalid PID attacks
 
 ---
 

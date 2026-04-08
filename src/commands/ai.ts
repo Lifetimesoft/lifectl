@@ -9,6 +9,32 @@ import {apiAi} from "../utils/api-ai.js";
 
 const AGENTS_DIR = path.join(os.homedir(), ".lifectl", "agents");
 
+const ALLOWED_RUNTIMES = ["node", "python", "python3", "deno", "bun"];
+
+function sanitizeName(name: string): string {
+    const safe = name.replace(/[^a-zA-Z0-9\-_.@/]/g, "");
+    if (safe.includes("..")) throw new Error(`Invalid agent name: '${name}'`);
+    return safe;
+}
+
+function sanitizeLog(s: string): string {
+    return String(s).replace(/[\r\n]/g, " ");
+}
+
+function validateCmd(cmd: string): void {
+    const base = cmd.split(" ")[0];
+    if (!ALLOWED_RUNTIMES.includes(base)) throw new Error(`Runtime '${base}' is not allowed. Allowed: ${ALLOWED_RUNTIMES.join(", ")}`);
+    if (/[;&|`$<>]/.test(cmd)) throw new Error("Invalid characters in script command");
+}
+
+function resolveAgentPath(name: string, ...parts: string[]): string {
+    const resolved = path.resolve(AGENTS_DIR, ...name.split("/"), ...parts);
+    if (!resolved.startsWith(path.resolve(AGENTS_DIR))) {
+        throw new Error(`Path traversal detected for agent name: '${name}'`);
+    }
+    return resolved;
+}
+
 export const aiCommand = new Command("ai").description("AI agent commands");
 
 const agentCommand = new Command("agent").description("Manage AI agents");
@@ -57,7 +83,7 @@ agentCommand
                 throw new Error(data.message);
             }
 
-            console.log(`✅ Pushed ${agent.name}@${agent.version}`);
+            console.log(`✅ Pushed ${sanitizeLog(agent.name)}@${sanitizeLog(agent.version)}`);
         } catch (err: any) {
             console.error("❌ Push failed:", err.message);
             process.exit(1);
@@ -67,7 +93,7 @@ agentCommand
     });
 
 function agentPath(name: string, ...parts: string[]): string {
-    return path.join(AGENTS_DIR, ...name.split("/"), ...parts);
+    return resolveAgentPath(name, ...parts);
 }
 
 async function getLatestLocalVersion(name: string): Promise<string> {
@@ -113,10 +139,11 @@ async function loadRegistry(): Promise<Record<string, any>> {
 agentCommand
     .command("pull <name>")
     .description("Pull agent from registry")
-    .action(async (name: string) => {
+    .action(async (rawName: string) => {
+        const name = sanitizeName(rawName);
         const tmpFile = path.join(os.tmpdir(), `agent-${Date.now()}.tar.gz`);
         try {
-            const response = await apiAi.post(`/agents/pull`, {name}, {responseType: "arraybuffer"});
+            const response = await apiAi.post("/agents/pull", {name}, {responseType: "arraybuffer"});
             await fs.writeFile(tmpFile, Buffer.from(response.data));
 
             const agentVersion = response.headers["x-agent-version"] ?? "unknown";
@@ -140,7 +167,7 @@ agentCommand
             };
             await fs.writeJson(registryFile, registry, {spaces: 2});
 
-            console.log(`✅ Pulled ${name}@${agentVersion}`);
+            console.log(`✅ Pulled ${sanitizeLog(name)}@${sanitizeLog(agentVersion)}`);
         } catch (err: any) {
             console.error("❌ Pull failed:", err.message);
             process.exit(1);
@@ -155,32 +182,39 @@ agentCommand
     .description("Start an agent")
     .action(async (nameArg: string) => {
         try {
-            const [name, versionArg] = nameArg.split(":");
+            const [rawName, versionArg] = nameArg.split(":");
+            const name = sanitizeName(rawName);
             const registry = await loadRegistry();
             const entry = registry[name];
             if (!entry) {
-                throw new Error(`Agent '${name}' not found. Run: lifectl ai agent pull ${name}`);
+                throw new Error(`Agent '${sanitizeLog(name)}' not found. Run: lifectl ai agent pull ${sanitizeLog(name)}`);
             }
             const version = versionArg ?? await getLatestLocalVersion(name);
             const agentDir = agentPath(name, version);
             if (!await fs.pathExists(agentDir)) {
-                throw new Error(`Agent '${name}:${version}' not found. Run: lifectl ai agent pull ${name}`);
+                throw new Error(`Agent '${sanitizeLog(name)}:${sanitizeLog(version)}' not found. Run: lifectl ai agent pull ${sanitizeLog(name)}`);
+            }
+
+            const pidFile = path.join(agentDir, "agent.pid");
+            if (await fs.pathExists(pidFile)) {
+                console.warn(`⚠️  Agent '${sanitizeLog(name)}:${sanitizeLog(version)}' is already running. Stop it first.`);
+                process.exit(1);
             }
 
             const agentJson = path.join(agentDir, "agent.json");
             const agent = await fs.readJson(agentJson);
 
+            const registryFile = path.join(AGENTS_DIR, "registry.json");
             const installCmd = agent.scripts?.install;
             if (!installCmd) {
-                const registryFile = path.join(AGENTS_DIR, "registry.json");
                 registry[name].versions[version].installed = true;
                 await fs.writeJson(registryFile, registry, {spaces: 2});
             } else {
                 const versionEntry = entry.versions?.[version];
-                if (installCmd && !versionEntry?.installed) {
+                if (!versionEntry?.installed) {
+                    validateCmd(installCmd);
                     console.log("📦 Installing dependencies...");
                     execSync(installCmd, {cwd: agentDir, stdio: "inherit"});
-                    const registryFile = path.join(AGENTS_DIR, "registry.json");
                     registry[name].versions[version].installed = true;
                     await fs.writeJson(registryFile, registry, {spaces: 2});
                 }
@@ -190,15 +224,15 @@ agentCommand
             if (!startCmd) {
                 throw new Error("No start script defined in agent.json");
             }
+            validateCmd(startCmd);
 
             const [cmd, ...args] = startCmd.split(" ");
             const child = spawn(cmd, args, {cwd: agentDir, detached: true, stdio: "ignore"});
             child.unref();
 
-            const pidFile = path.join(agentDir, "agent.pid");
             await fs.writeFile(pidFile, String(child.pid));
 
-            console.log(`✅ Agent '${name}:${version}' started (pid: ${child.pid})`);
+            console.log(`✅ Agent '${sanitizeLog(name)}:${sanitizeLog(version)}' started (pid: ${child.pid})`);
         } catch (err: any) {
             console.error("❌ Start failed:", err.message);
             process.exit(1);
@@ -211,33 +245,38 @@ agentCommand
     .description("Stop an agent")
     .action(async (nameArg: string) => {
         try {
-            const [name, versionArg] = nameArg.split(":");
+            const [rawName, versionArg] = nameArg.split(":");
+            const name = sanitizeName(rawName);
             const registry = await loadRegistry();
-            if (!registry[name]) throw new Error(`Agent '${name}' not found`);
+            if (!registry[name]) throw new Error(`Agent '${sanitizeLog(name)}' not found`);
             const version = versionArg ?? await getLatestLocalVersion(name);
             const agentDir = agentPath(name, version);
             const pidFile = path.join(agentDir, "agent.pid");
 
             if (await fs.pathExists(pidFile)) {
-                const pid = parseInt(await fs.readFile(pidFile, "utf-8"));
+                const pidRaw = parseInt(await fs.readFile(pidFile, "utf-8"));
+                if (!Number.isFinite(pidRaw) || pidRaw <= 0) throw new Error("Invalid PID in agent.pid");
                 try {
-                    process.kill(pid);
-                } catch {
+                    process.kill(pidRaw, 0); // verify process exists before killing
+                    process.kill(pidRaw);
+                } catch (e: any) {
+                    if (e.code !== "ESRCH") throw e; // ESRCH = process not found, safe to ignore
                 }
                 await fs.remove(pidFile);
-                console.log(`✅ Agent '${name}@${version}' stopped`);
+                console.log(`✅ Agent '${sanitizeLog(name)}@${sanitizeLog(version)}' stopped`);
                 return;
             }
 
             const agentJson = path.join(agentDir, "agent.json");
-            if (!await fs.pathExists(agentJson)) throw new Error(`Agent '${name}@${version}' not found`);
+            if (!await fs.pathExists(agentJson)) throw new Error(`Agent '${sanitizeLog(name)}@${sanitizeLog(version)}' not found`);
 
             const agent = await fs.readJson(agentJson);
             const stopCmd = agent.scripts?.stop;
             if (!stopCmd) throw new Error("No stop script defined in agent.json");
+            validateCmd(stopCmd);
 
             execSync(stopCmd, {cwd: agentDir, stdio: "inherit"});
-            console.log(`✅ Agent '${name}@${version}' stopped`);
+            console.log(`✅ Agent '${sanitizeLog(name)}@${sanitizeLog(version)}' stopped`);
         } catch (err: any) {
             console.error("❌ Stop failed:", err.message);
             process.exit(1);
@@ -269,8 +308,16 @@ agentCommand
         const rows = await Promise.all(entries.flatMap((entry) => {
             const versions = Object.values(entry.versions ?? {}) as any[];
             return versions.map(async (v) => {
-                const pidFile = agentPath(v.name, v.version, "agent.pid");
-                const status = await fs.pathExists(pidFile) ? "running" : "stopped";
+                let status = "stopped";
+                try {
+                    const pidFile = agentPath(v.name, v.version, "agent.pid");
+                    if (await fs.pathExists(pidFile)) {
+                        const pid = parseInt(await fs.readFile(pidFile, "utf-8"));
+                        if (Number.isFinite(pid) && pid > 0) {
+                            try { process.kill(pid, 0); status = "running"; } catch { await fs.remove(pidFile); }
+                        }
+                    }
+                } catch { /* invalid name, skip */ }
                 return {
                     status,
                     name: v.name ?? "-",
