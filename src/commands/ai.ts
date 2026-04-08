@@ -4,6 +4,7 @@ import fs from "fs-extra";
 import path from "path";
 import os from "os";
 import * as tar from "tar";
+import semver from "semver";
 import {apiAi} from "../utils/api-ai.js";
 
 const AGENTS_DIR = path.join(os.homedir(), ".lifectl", "agents");
@@ -65,6 +66,18 @@ agentCommand
         }
     });
 
+function agentPath(name: string, ...parts: string[]): string {
+    return path.join(AGENTS_DIR, ...name.split("/"), ...parts);
+}
+
+async function getLatestLocalVersion(name: string): Promise<string> {
+    const registry = await loadRegistry();
+    const versions = Object.keys(registry[name]?.versions ?? {});
+    const latest = semver.maxSatisfying(versions, "*");
+    if (!latest) throw new Error(`No versions found for agent '${name}'`);
+    return latest;
+}
+
 async function loadRegistry(): Promise<Record<string, any>> {
     const registryFile = path.join(AGENTS_DIR, "registry.json");
     if (await fs.pathExists(registryFile)) {
@@ -77,20 +90,20 @@ async function loadRegistry(): Promise<Record<string, any>> {
         const agentNameDir = path.join(AGENTS_DIR, agentName);
         if (!(await fs.stat(agentNameDir)).isDirectory()) continue;
         const versions = await fs.readdir(agentNameDir);
-        const sorted = versions.sort();
-        const latest = sorted[sorted.length - 1];
-        if (!latest) continue;
-        const agentJson = path.join(agentNameDir, latest, "agent.json");
-        if (!await fs.pathExists(agentJson)) continue;
-        const agent = await fs.readJson(agentJson);
-        registry[agentName] = {
-            name: agent.name ?? agentName,
-            version: agent.version ?? latest,
-            description: agent.description ?? "",
-            runtime: agent.runtime ?? "",
-            installed: false,
-            pulledAt: Date.now(),
-        };
+        registry[agentName] = {versions: {}};
+        for (const ver of versions) {
+            const agentJson = path.join(agentNameDir, ver, "agent.json");
+            if (!await fs.pathExists(agentJson)) continue;
+            const agent = await fs.readJson(agentJson);
+            registry[agentName].versions[ver] = {
+                name: agent.name ?? agentName,
+                version: agent.version ?? ver,
+                description: agent.description ?? "",
+                runtime: agent.runtime ?? "",
+                installed: false,
+                pulledAt: Date.now(),
+            };
+        }
     }
     await fs.writeJson(registryFile, registry, {spaces: 2});
     return registry;
@@ -107,7 +120,7 @@ agentCommand
             await fs.writeFile(tmpFile, Buffer.from(response.data));
 
             const agentVersion = response.headers["x-agent-version"] ?? "unknown";
-            const agentDir = path.join(AGENTS_DIR, name, agentVersion);
+            const agentDir = agentPath(name, agentVersion);
             await fs.ensureDir(agentDir);
             await tar.extract({file: tmpFile, cwd: agentDir});
 
@@ -116,7 +129,8 @@ agentCommand
 
             const registryFile = path.join(AGENTS_DIR, "registry.json");
             const registry = await fs.pathExists(registryFile) ? await fs.readJson(registryFile) : {};
-            registry[name] = {
+            if (!registry[name]) registry[name] = {versions: {}};
+            registry[name].versions[agentVersion] = {
                 name: agent.name ?? name,
                 version: agent.version ?? agentVersion,
                 description: agent.description ?? "",
@@ -139,22 +153,43 @@ agentCommand
 agentCommand
     .command("start <name>")
     .description("Start an agent")
-    .action(async (name: string) => {
+    .action(async (nameArg: string) => {
         try {
-            const agentDir = path.join(AGENTS_DIR, name);
-            if (!await fs.pathExists(agentDir)) throw new Error(`Agent '${name}' not found. Run: lifectl ai agent pull ${name}`);
+            const [name, versionArg] = nameArg.split(":");
+            const registry = await loadRegistry();
+            const entry = registry[name];
+            if (!entry) {
+                throw new Error(`Agent '${name}' not found. Run: lifectl ai agent pull ${name}`);
+            }
+            const version = versionArg ?? await getLatestLocalVersion(name);
+            const agentDir = agentPath(name, version);
+            if (!await fs.pathExists(agentDir)) {
+                throw new Error(`Agent '${name}:${version}' not found. Run: lifectl ai agent pull ${name}`);
+            }
 
             const agentJson = path.join(agentDir, "agent.json");
             const agent = await fs.readJson(agentJson);
 
             const installCmd = agent.scripts?.install;
-            if (installCmd) {
-                console.log("📦 Installing dependencies...");
-                execSync(installCmd, {cwd: agentDir, stdio: "inherit"});
+            if (!installCmd) {
+                const registryFile = path.join(AGENTS_DIR, "registry.json");
+                registry[name].versions[version].installed = true;
+                await fs.writeJson(registryFile, registry, {spaces: 2});
+            } else {
+                const versionEntry = entry.versions?.[version];
+                if (installCmd && !versionEntry?.installed) {
+                    console.log("📦 Installing dependencies...");
+                    execSync(installCmd, {cwd: agentDir, stdio: "inherit"});
+                    const registryFile = path.join(AGENTS_DIR, "registry.json");
+                    registry[name].versions[version].installed = true;
+                    await fs.writeJson(registryFile, registry, {spaces: 2});
+                }
             }
 
             const startCmd = agent.scripts?.start;
-            if (!startCmd) throw new Error("No start script defined in agent.json");
+            if (!startCmd) {
+                throw new Error("No start script defined in agent.json");
+            }
 
             const [cmd, ...args] = startCmd.split(" ");
             const child = spawn(cmd, args, {cwd: agentDir, detached: true, stdio: "ignore"});
@@ -163,7 +198,7 @@ agentCommand
             const pidFile = path.join(agentDir, "agent.pid");
             await fs.writeFile(pidFile, String(child.pid));
 
-            console.log(`✅ Agent '${name}' started (pid: ${child.pid})`);
+            console.log(`✅ Agent '${name}:${version}' started (pid: ${child.pid})`);
         } catch (err: any) {
             console.error("❌ Start failed:", err.message);
             process.exit(1);
@@ -174,9 +209,13 @@ agentCommand
 agentCommand
     .command("stop <name>")
     .description("Stop an agent")
-    .action(async (name: string) => {
+    .action(async (nameArg: string) => {
         try {
-            const agentDir = path.join(AGENTS_DIR, name);
+            const [name, versionArg] = nameArg.split(":");
+            const registry = await loadRegistry();
+            if (!registry[name]) throw new Error(`Agent '${name}' not found`);
+            const version = versionArg ?? await getLatestLocalVersion(name);
+            const agentDir = agentPath(name, version);
             const pidFile = path.join(agentDir, "agent.pid");
 
             if (await fs.pathExists(pidFile)) {
@@ -186,19 +225,19 @@ agentCommand
                 } catch {
                 }
                 await fs.remove(pidFile);
-                console.log(`✅ Agent '${name}' stopped`);
+                console.log(`✅ Agent '${name}@${version}' stopped`);
                 return;
             }
 
             const agentJson = path.join(agentDir, "agent.json");
-            if (!await fs.pathExists(agentJson)) throw new Error(`Agent '${name}' not found`);
+            if (!await fs.pathExists(agentJson)) throw new Error(`Agent '${name}@${version}' not found`);
 
             const agent = await fs.readJson(agentJson);
             const stopCmd = agent.scripts?.stop;
             if (!stopCmd) throw new Error("No stop script defined in agent.json");
 
             execSync(stopCmd, {cwd: agentDir, stdio: "inherit"});
-            console.log(`✅ Agent '${name}' stopped`);
+            console.log(`✅ Agent '${name}@${version}' stopped`);
         } catch (err: any) {
             console.error("❌ Stop failed:", err.message);
             process.exit(1);
@@ -227,17 +266,20 @@ agentCommand
             return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
         };
 
-        const rows = await Promise.all(entries.map(async (entry) => {
-            const pidFile = path.join(AGENTS_DIR, entry.name, entry.version, "agent.pid");
-            const status = await fs.pathExists(pidFile) ? "running" : "stopped";
-            return {
-                status,
-                name: entry.name ?? "-",
-                version: entry.version ?? "-",
-                runtime: entry.runtime ?? "-",
-                installed: entry.installed ? "yes" : "no",
-                pulledAt: formatDate(entry.pulledAt),
-            };
+        const rows = await Promise.all(entries.flatMap((entry) => {
+            const versions = Object.values(entry.versions ?? {}) as any[];
+            return versions.map(async (v) => {
+                const pidFile = agentPath(v.name, v.version, "agent.pid");
+                const status = await fs.pathExists(pidFile) ? "running" : "stopped";
+                return {
+                    status,
+                    name: v.name ?? "-",
+                    version: v.version ?? "-",
+                    runtime: v.runtime ?? "-",
+                    installed: v.installed ? "yes" : "no",
+                    pulledAt: formatDate(v.pulledAt),
+                };
+            });
         }));
 
         const pad = (s: string, n: number) => s.padEnd(n);
