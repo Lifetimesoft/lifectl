@@ -46,6 +46,9 @@ lifectl ai agent start <name>:<ver>   # Start specific version
 lifectl ai agent stop <name>          # Stop latest version
 lifectl ai agent stop <name>:<ver>    # Stop specific version
 lifectl ai agent list                 # List installed agents
+lifectl ai agent log <name>           # Show last 50 lines of log
+lifectl ai agent log <name> -n 100    # Show last N lines
+lifectl ai agent log <name> -f        # Follow log output
 ```
 
 #### Example output of `list`
@@ -87,7 +90,7 @@ node  python  python3  deno  bun
 * [x] Agent process manager (PID-based)
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
-* [ ] Show logs when starting agent
+* [x] Show logs when starting agent
 * [ ] Agent environment variables support
 * [ ] Run agent on sandbox
 
