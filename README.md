@@ -41,14 +41,16 @@ lifectl auth logout      # Logout
 ```bash
 lifectl ai agent pull <name>          # Pull agent from registry
 lifectl ai agent push                 # Push agent to registry
-lifectl ai agent start <name>         # Start latest version
-lifectl ai agent start <name>:<ver>   # Start specific version
-lifectl ai agent stop <name>          # Stop latest version
-lifectl ai agent stop <name>:<ver>    # Stop specific version
-lifectl ai agent list                 # List installed agents
-lifectl ai agent log <name>           # Show last 50 lines of log
-lifectl ai agent log <name> -n 100    # Show last N lines
-lifectl ai agent log <name> -f        # Follow log output
+lifectl ai agent start <name>           # Start latest version
+lifectl ai agent start <name>:<ver>     # Start specific version
+lifectl ai agent stop <name>            # Stop latest version
+lifectl ai agent stop <name>:<ver>      # Stop specific version
+lifectl ai agent restart <name>         # Restart latest version
+lifectl ai agent restart <name>:<ver>   # Restart specific version
+lifectl ai agent list                   # List installed agents
+lifectl ai agent log <name>             # Show last 50 lines of log
+lifectl ai agent log <name> -n 100      # Show last N lines
+lifectl ai agent log <name> -f          # Follow log output
 ```
 
 #### Example output of `list`
@@ -64,7 +66,7 @@ STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
 Agents can only use these runtimes in `agent.json` scripts:
 
 ```
-node  python  python3  deno  bun
+node  python  python3  deno  bun  npx  ts-node  tsx
 ```
 
 ---
@@ -100,7 +102,9 @@ node  python  python3  deno  bun
 
 * Token-based authentication
 * No credentials stored in plain text
-* Runtime whitelist — only `node`, `python`, `python3`, `deno`, `bun` are allowed
+* Runtime whitelist — only `node`, `python`, `python3`, `deno`, `bun`, `npx`, `ts-node`, `tsx` are allowed
+* PID reuse detection — verifies process start time before kill (Linux)
+* tar path traversal protection — blocks `..` entries during agent extraction
 * Shell metacharacter blocking — `;`, `&`, `|`, `` ` ``, `$`, `<`, `>`
 * Path traversal protection — agents are isolated under `~/.lifectl/agents/`
 * PID validation before kill — prevents stale or invalid PID attacks
