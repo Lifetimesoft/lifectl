@@ -36,24 +36,49 @@ lifectl auth login       # Login via browser
 lifectl auth logout      # Logout
 ```
 
-### AI Agent
+### AI Agent — Image
 
 ```bash
 lifectl ai agent pull <name>          # Pull agent from registry
+lifectl ai agent pull <name>:<ver>    # Pull specific version
 lifectl ai agent push                 # Push agent to registry
-lifectl ai agent start <name>         # Start latest version
-lifectl ai agent start <name>:<ver>   # Start specific version
-lifectl ai agent stop <name>          # Stop latest version
-lifectl ai agent stop <name>:<ver>    # Stop specific version
-lifectl ai agent list                 # List installed agents
+lifectl ai agent list                 # List pulled agents
+lifectl ai agent rma <name>           # Remove agent (all versions)
+lifectl ai agent rma <name>:<ver>     # Remove specific version
+```
+
+### AI Agent — Container
+
+```bash
+lifectl ai agent run <name>           # Run agent (pull if needed, create new container)
+lifectl ai agent run <name>:<ver>     # Run specific version
+lifectl ai agent ps                   # List all containers
+lifectl ai agent start <containerId>  # Start a stopped container
+lifectl ai agent stop <name>          # Stop container by name
+lifectl ai agent stop <containerId>   # Stop container by id
+lifectl ai agent restart <name>       # Restart container by name
+lifectl ai agent restart <containerId># Restart container by id
+lifectl ai agent rm <containerId>     # Remove a stopped container
+lifectl ai agent logs <name>          # Show last 50 lines of log
+lifectl ai agent logs <containerId>   # Show logs by container id
+lifectl ai agent logs <name> -n 100   # Show last N lines
+lifectl ai agent logs <name> -f       # Follow log output
 ```
 
 #### Example output of `list`
 
 ```
-STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
-🟢 running  hello-world-agent  1.0.0    node     no         06/04/2026 20:09
-⚫ stopped  my-other-agent     2.1.0    python   no         05/04/2026 15:30
+AGENT ID      NAME               VERSION  RUNTIME  PULLED AT
+a3f9c12b4e07  hello-world-agent  1.0.0    node     06/04/2026 20:09
+b7d2e45f1c08  my-other-agent     2.1.0    python   05/04/2026 15:30
+```
+
+#### Example output of `ps`
+
+```
+CONTAINER ID  AGENT ID      NAME               VERSION  STATUS      PID    STARTED AT
+a3f9c12b4e07  b7d2e45f1c08  hello-world-agent  1.0.0    🟢 running  12345  06/04/2026 20:09
+c1e8f23a9d05  b7d2e45f1c08  hello-world-agent  1.0.0    ⚫ stopped  12346  05/04/2026 15:30
 ```
 
 #### Allowed runtimes
@@ -61,16 +86,28 @@ STATUS      NAME               VERSION  RUNTIME  INSTALLED  PULLED AT
 Agents can only use these runtimes in `agent.json` scripts:
 
 ```
-node  python  python3  deno  bun
+node  python  python3  deno  bun  npx  ts-node  tsx
 ```
 
 ---
 
 ## 🏗 Architecture
 
+```
+~/.lifectl/
+  agents/
+    registry.json          ← image registry
+    <name>/<version>/      ← agent files
+  containers/
+    containers.json        ← container registry
+    <containerId>/         ← per-process folder
+      agent.pid
+      agent.log
+```
+
 * **lifectl CLI** → control agents
 * **Agent Registry** → store & version agents
-* **Agent Runtime** → execute agents safely
+* **Container Runtime** → isolated process per run
 * **SaaS Platform** → monitoring & management
 
 ---
@@ -85,9 +122,12 @@ node  python  python3  deno  bun
 * [x] Local agent registry (registry.json)
 * [x] Agent runtime (local execution)
 * [x] Agent process manager (PID-based)
+* [x] Docker-style container model (run/start/stop/ps/rm)
+* [x] Agent image management (list/rma)
+* [x] Log rotation
+* [x] Multi-container per agent
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
-* [ ] Show logs when starting agent
 * [ ] Agent environment variables support
 * [ ] Run agent on sandbox
 
@@ -97,7 +137,9 @@ node  python  python3  deno  bun
 
 * Token-based authentication
 * No credentials stored in plain text
-* Runtime whitelist — only `node`, `python`, `python3`, `deno`, `bun` are allowed
+* Runtime whitelist — only `node`, `python`, `python3`, `deno`, `bun`, `npx`, `ts-node`, `tsx` are allowed
+* PID reuse detection — verifies process start time before kill (Linux)
+* tar path traversal protection — blocks `..` entries during agent extraction
 * Shell metacharacter blocking — `;`, `&`, `|`, `` ` ``, `$`, `<`, `>`
 * Path traversal protection — agents are isolated under `~/.lifectl/agents/`
 * PID validation before kill — prevents stale or invalid PID attacks
