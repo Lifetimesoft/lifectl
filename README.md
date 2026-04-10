@@ -9,11 +9,13 @@
 ## ✨ Features
 
 * 📦 Pull agents from registry
-* ▶️ Run agents locally
+* ▶️ Run agents locally with named containers
 * 🧠 Plug-and-play agent system
 * 🔐 Secure authentication via SaaS
 * ⚡ Lightweight and fast
 * 🔄 Versioned agents
+* 📋 Docker-style container lifecycle (run/start/stop/restart/rm)
+* 📝 Log rotation with follow mode
 
 ---
 
@@ -50,19 +52,30 @@ lifectl ai agent rma <name>:<ver>     # Remove specific version
 ### AI Agent — Container
 
 ```bash
-lifectl ai agent run <name>           # Run agent (pull if needed, create new container)
-lifectl ai agent run <name>:<ver>     # Run specific version
-lifectl ai agent ps                   # List all containers
-lifectl ai agent start <containerId>  # Start a stopped container
-lifectl ai agent stop <name>          # Stop container by name
-lifectl ai agent stop <containerId>   # Stop container by id
-lifectl ai agent restart <name>       # Restart container by name
-lifectl ai agent restart <containerId># Restart container by id
-lifectl ai agent rm <containerId>     # Remove a stopped container
-lifectl ai agent logs <name>          # Show last 50 lines of log
-lifectl ai agent logs <containerId>   # Show logs by container id
-lifectl ai agent logs <name> -n 100   # Show last N lines
-lifectl ai agent logs <name> -f       # Follow log output
+lifectl ai agent run <name>                      # Run agent (pull if needed)
+lifectl ai agent run <name>:<ver>                # Run specific version
+lifectl ai agent run <name> --name <alias>       # Run with a custom container name
+lifectl ai agent ps                              # List all containers
+lifectl ai agent ps --name <name>                # Filter by agent name or alias
+lifectl ai agent ps --status running             # Filter by status: running | stopped
+lifectl ai agent ps --name <name> --status stopped  # Combine filters
+lifectl ai agent start <containerId>             # Start a stopped container
+lifectl ai agent stop <name|alias|containerId>   # Stop a container
+lifectl ai agent restart <name|alias|containerId># Restart a container
+lifectl ai agent rm <containerId>                # Remove a stopped container
+lifectl ai agent logs <name|alias|containerId>   # Show last 50 lines of log
+lifectl ai agent logs <name> -n 100              # Show last N lines
+lifectl ai agent logs <name> -f                  # Follow log output (auto-stops when process exits)
+```
+
+#### Named containers
+
+Assign a custom name to a container for easier management:
+
+```bash
+lifectl ai agent run my-agent --name web
+lifectl ai agent logs web
+lifectl ai agent stop web
 ```
 
 #### Example output of `list`
@@ -76,9 +89,9 @@ b7d2e45f1c08  my-other-agent     2.1.0    python   05/04/2026 15:30
 #### Example output of `ps`
 
 ```
-CONTAINER ID  AGENT ID      NAME               VERSION  STATUS      PID    STARTED AT
-a3f9c12b4e07  b7d2e45f1c08  hello-world-agent  1.0.0    🟢 running  12345  06/04/2026 20:09
-c1e8f23a9d05  b7d2e45f1c08  hello-world-agent  1.0.0    ⚫ stopped  12346  05/04/2026 15:30
+CONTAINER ID  AGENT ID      NAME                        VERSION  STATUS      PID    STARTED AT
+a3f9c12b4e07  b7d2e45f1c08  hello-world-agent (web)     1.0.0    🟢 running  12345  06/04/2026 20:09
+c1e8f23a9d05  b7d2e45f1c08  hello-world-agent           1.0.0    ⚫ stopped  12346  05/04/2026 15:30
 ```
 
 #### Allowed runtimes
@@ -98,11 +111,14 @@ node  python  python3  deno  bun  npx  ts-node  tsx
   agents/
     registry.json          ← image registry
     <name>/<version>/      ← agent files
+      agent.json
+      .install.lock        ← prevents concurrent installs
   containers/
     containers.json        ← container registry
     <containerId>/         ← per-process folder
       agent.pid
       agent.log
+      agent.log.1          ← rotated logs (up to 5 files, 10MB each)
 ```
 
 * **lifectl CLI** → control agents
@@ -124,8 +140,11 @@ node  python  python3  deno  bun  npx  ts-node  tsx
 * [x] Agent process manager (PID-based)
 * [x] Docker-style container model (run/start/stop/ps/rm)
 * [x] Agent image management (list/rma)
-* [x] Log rotation
+* [x] Log rotation (up to 5 files × 10MB)
 * [x] Multi-container per agent
+* [x] Named containers (`--name`)
+* [x] Container filtering (`ps --name`, `ps --status`)
+* [x] Follow log with auto-exit on process death
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
 * [ ] Agent environment variables support
@@ -143,6 +162,8 @@ node  python  python3  deno  bun  npx  ts-node  tsx
 * Shell metacharacter blocking — `;`, `&`, `|`, `` ` ``, `$`, `<`, `>`
 * Path traversal protection — agents are isolated under `~/.lifectl/agents/`
 * PID validation before kill — prevents stale or invalid PID attacks
+* Atomic install lock — `O_EXCL` file lock prevents concurrent dependency installs
+* Atomic container writes — write-queue + temp file rename prevents `containers.json` corruption
 
 ---
 
