@@ -310,10 +310,12 @@ async function spawnProcess(containerId: string, agentDir: string, startCmd: str
 agentCommand
     .command("run <name>")
     .description("Run an agent (pull if needed, create new container)")
-    .action(async (nameArg: string) => {
+    .option("--name <alias>", "Assign a name to the container")
+    .action(async (nameArg: string, opts: { name?: string }) => {
         try {
             const [rawName, versionArg] = nameArg.split(":");
             const name = sanitizeName(rawName);
+            const alias = opts.name ? sanitizeName(opts.name) : undefined;
 
             let registry = await loadRegistry();
             if (!registry[name]) {
@@ -383,10 +385,14 @@ agentCommand
                 const pid = await spawnProcess(containerId, agentDir, startCmd);
 
                 const containers = await loadContainers();
+                if (alias && Object.values(containers as Record<string, any>).some(c => c.alias === alias)) {
+                    throw new Error(`Container name '${sanitizeLog(alias)}' is already in use`);
+                }
                 containers[containerId] = {
                     containerId,
                     agentId: versionEntry.agentId,
                     name,
+                    ...(alias ? {alias} : {}),
                     version,
                     pid,
                     startedAt: Date.now(),
@@ -509,7 +515,7 @@ async function resolveContainerId(nameOrId: string, requireSingle = false): Prom
     try { sanitizeContainerId(nameOrId); isId = true; } catch { /* not an id format */ }
     if (isId && containers[nameOrId]) return nameOrId;
     const matches = Object.values(containers as Record<string, any>)
-        .filter(c => c.name === nameOrId && isProcessAlive(c.pid));
+        .filter(c => (c.alias === nameOrId || c.name === nameOrId) && isProcessAlive(c.pid));
     if (matches.length === 0) throw new Error(`No running container found for '${sanitizeLog(nameOrId)}'\nUse 'lifectl ai agent ps' to list containers.`);
     if (requireSingle && matches.length > 1) {
         const ids = matches.map(c => (c.containerId as string).slice(0, 12)).join(", ");
@@ -682,9 +688,26 @@ agentCommand
 agentCommand
     .command("ps")
     .description("List running agent containers (like docker ps)")
-    .action(async () => {
+    .option("--name <name>", "Filter by agent name or container alias")
+    .option("--status <status>", "Filter by status: running | stopped")
+    .action(async (opts: { name?: string; status?: string }) => {
         const containers = await loadContainers();
-        const all = Object.values(containers as Record<string, any>);
+        let all = Object.values(containers as Record<string, any>);
+        if (opts.name) {
+            const filter = opts.name.trim();
+            all = all.filter(c => c.name === filter || c.alias === filter);
+        }
+        if (opts.status) {
+            const filterStatus = opts.status.trim().toLowerCase();
+            if (filterStatus !== "running" && filterStatus !== "stopped") {
+                console.error("❌ --status must be 'running' or 'stopped'");
+                process.exit(1);
+            }
+            all = all.filter(c => {
+                const alive = Number.isFinite(c.pid) && c.pid > 0 && isProcessAlive(c.pid);
+                return filterStatus === "running" ? alive : !alive;
+            });
+        }
         if (all.length === 0) {
             console.log("No containers.");
             return;
@@ -700,7 +723,7 @@ agentCommand
             return {
                 containerId: (c.containerId ?? "-").slice(0, 12),
                 agentId: (c.agentId ?? "-").slice(0, 12),
-                name: c.name ?? "-",
+                name: c.alias ? `${c.name} (${c.alias})` : (c.name ?? "-"),
                 version: c.version ?? "-",
                 status: alive ? "running" : "stopped",
                 pid: String(c.pid ?? "-"),
