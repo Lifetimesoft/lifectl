@@ -15,14 +15,22 @@ const CONTAINERS_DIR = path.join(os.homedir(), ".lifectl", "containers");
 
 const ALLOWED_RUNTIMES = new Set(["node", "python", "python3", "deno", "bun", "npx", "ts-node", "tsx"]);
 
+const CONTAINER_ID_BYTES = 6;
+const CONTAINER_ID_REGEX = /^[a-f0-9]{12}$/; // CONTAINER_ID_BYTES * 2
+
 function generateId(): string {
-    return crypto.randomBytes(6).toString("hex");
+    return crypto.randomBytes(CONTAINER_ID_BYTES).toString("hex");
 }
 
 function sanitizeName(name: string): string {
     const safe = name.replace(/[^a-zA-Z0-9\-_.\/]/g, "");
     if (safe.includes("..") || safe.startsWith("/") || safe.endsWith("/") || safe.includes("//")) throw new Error(`Invalid agent name: '${name}'`);
     return safe;
+}
+
+function sanitizeContainerId(id: string): string {
+    if (!CONTAINER_ID_REGEX.test(id)) throw new Error(`Invalid container id: '${id}'`);
+    return id;
 }
 
 function sanitizeLog(s: string): string {
@@ -46,7 +54,10 @@ function parseCmd(cmd: string): { bin: string; args: string[] } {
         } else if (ch === "'" || ch === '"') {
             quote = ch;
         } else if (ch === " ") {
-            if (current) { tokens.push(current); current = ""; }
+            if (current) {
+                tokens.push(current);
+                current = "";
+            }
         } else {
             current += ch;
         }
@@ -78,8 +89,18 @@ async function tarDirectory(sourceDir: string, outPath: string): Promise<void> {
         const lines = (await fs.readFile(ignoreFile, "utf-8")).split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
         ignorePatterns.push(...lines);
     }
-    const entries = (await fs.readdir(sourceDir)).filter(f => !ignorePatterns.some(p => minimatch(f, p)));
-    await tar.create({gzip: true, file: outPath, cwd: sourceDir}, entries);
+    await tar.create(
+        {
+            gzip: true,
+            file: outPath,
+            cwd: sourceDir,
+            filter: (filePath) => {
+                const rel = filePath.replace(/\\/g, "/");
+                return !ignorePatterns.some(p => minimatch(rel, p, {matchBase: true, dot: true}));
+            },
+        },
+        ["."],
+    );
 }
 
 function agentPath(name: string, ...parts: string[]): string {
@@ -102,7 +123,11 @@ async function loadRegistry(): Promise<Record<string, any>> {
     if (!await fs.pathExists(AGENTS_DIR)) return registry;
     for (const rawAgentName of await fs.readdir(AGENTS_DIR)) {
         let agentName: string;
-        try { agentName = sanitizeName(rawAgentName); } catch { continue; }
+        try {
+            agentName = sanitizeName(rawAgentName);
+        } catch {
+            continue;
+        }
         const agentNameDir = path.join(AGENTS_DIR, agentName);
         if (!(await fs.stat(agentNameDir)).isDirectory()) continue;
         const allEntries = await fs.readdir(agentNameDir);
@@ -115,13 +140,14 @@ async function loadRegistry(): Promise<Record<string, any>> {
             if (!await fs.pathExists(agentJson)) continue;
             const agent = await fs.readJson(agentJson);
             const stableId = crypto.createHash("sha256").update(`${agentName}@${ver}`).digest("hex").slice(0, 12);
+            const agentJsonStat = await fs.stat(agentJson).catch(() => null);
             registry[agentName].versions[ver] = {
                 agentId: stableId,
                 name: agent.name ?? agentName,
                 version: agent.version ?? ver,
                 description: agent.description ?? "",
                 runtime: agent.runtime ?? "",
-                pulledAt: Date.now(),
+                pulledAt: agentJsonStat ? agentJsonStat.mtimeMs : Date.now(),
             };
         }
     }
@@ -143,7 +169,7 @@ async function pullAgent(name: string): Promise<void> {
         const registryFile = path.join(AGENTS_DIR, "registry.json");
         const registry = await fs.pathExists(registryFile) ? await fs.readJson(registryFile) : {};
         if (!registry[name]) registry[name] = {versions: {}};
-        const agentId = generateId();
+        const agentId = crypto.createHash("sha256").update(`${name}@${agentVersion}`).digest("hex").slice(0, 12);
         registry[name].versions[agentVersion] = {
             agentId,
             name: agent.name ?? name,
@@ -159,19 +185,35 @@ async function pullAgent(name: string): Promise<void> {
     }
 }
 
+// Serialise all containers.json writes to prevent race conditions
+let _containersWriteQueue: Promise<void> = Promise.resolve();
+
 async function loadContainers(): Promise<Record<string, any>> {
+    await _containersWriteQueue; // wait for any pending write before reading
     const containersFile = path.join(CONTAINERS_DIR, "containers.json");
     if (await fs.pathExists(containersFile)) return await fs.readJson(containersFile);
     return {};
 }
 
 async function saveContainers(containers: Record<string, any>): Promise<void> {
-    await fs.ensureDir(CONTAINERS_DIR);
-    await fs.writeJson(path.join(CONTAINERS_DIR, "containers.json"), containers, {spaces: 2});
+    // catch() prevents a failed write from poisoning the entire queue chain
+    _containersWriteQueue = _containersWriteQueue.catch(() => {}).then(async () => {
+        await fs.ensureDir(CONTAINERS_DIR);
+        const containersFile = path.join(CONTAINERS_DIR, "containers.json");
+        const tmp = containersFile + ".tmp";
+        await fs.writeJson(tmp, containers, {spaces: 2});
+        await fs.move(tmp, containersFile, {overwrite: true});
+    });
+    await _containersWriteQueue;
 }
 
 function isProcessAlive(pid: number): boolean {
-    try { process.kill(pid, 0); return true; } catch { return false; }
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 // push
@@ -227,6 +269,7 @@ async function rotateLog(logFile: string): Promise<void> {
     if (!await fs.pathExists(logFile)) return;
     const {size} = await fs.stat(logFile);
     if (size < LOG_MAX_BYTES) return;
+    await fs.remove(`${logFile}.${LOG_MAX_FILES}`).catch(() => {});
     for (let i = LOG_MAX_FILES - 1; i >= 1; i--) {
         const src = `${logFile}.${i}`;
         const dst = `${logFile}.${i + 1}`;
@@ -241,11 +284,24 @@ async function spawnProcess(containerId: string, agentDir: string, startCmd: str
     const pidFile = path.join(containerDir, "agent.pid");
     await rotateLog(logFile);
     const logFd = fs.openSync(logFile, "a");
-    const {bin: cmd, args} = parseCmd(startCmd);
-    const child = spawn(cmd, args, {cwd: agentDir, detached: true, stdio: ["ignore", logFd, logFd]});
-    fs.closeSync(logFd);
-    child.unref();
+    let child;
+    try {
+        const {bin: cmd, args} = parseCmd(startCmd);
+        child = spawn(cmd, args, {cwd: agentDir, detached: true, stdio: ["ignore", logFd, logFd]});
+    } finally {
+        fs.closeSync(logFd);
+    }
     if (child.pid == null) throw new Error("Failed to spawn agent process");
+
+    // wait a tick to catch immediate spawn errors (e.g. binary not found)
+    // before unref-ing the process
+    await new Promise<void>((resolve, reject) => {
+        child.once("error", (err) => reject(new Error(`Failed to start process: ${err.message}`)));
+        // setImmediate gives the event loop one turn to fire the error event if it's coming
+        setImmediate(resolve);
+    });
+
+    child.unref();
     await fs.writeJson(pidFile, {pid: child.pid, startedAt: Date.now(), cmd: startCmd});
     return child.pid;
 }
@@ -277,9 +333,43 @@ agentCommand
 
             const installCmd = agent.scripts?.install;
             if (installCmd) {
-                validateCmd(installCmd);
-                console.log("📦 Installing dependencies...");
-                execSync(installCmd, {cwd: agentDir, stdio: "inherit"});
+                const versionEntry = entry.versions[version];
+                if (!versionEntry.installedAt) {
+                    const lockFile = path.join(agentDir, ".install.lock");
+                    // atomic exclusive create — fails if another process already holds the lock
+                    let lockFd: number | null = null;
+                    try {
+                        lockFd = await fs.open(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+                    } catch {
+                        // another instance is installing — wait for it to finish then skip
+                        console.log("⏳ Another instance is installing dependencies, waiting...");
+                        while (await fs.pathExists(lockFile)) {
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+                        // re-read registry to check if install completed
+                        const freshRegistry = await loadRegistry();
+                        if (freshRegistry[name]?.versions[version]?.installedAt) {
+                            // already installed by the other instance
+                        } else {
+                            throw new Error("Install lock released but installedAt not set — install may have failed");
+                        }
+                        lockFd = null;
+                    }
+                    if (lockFd !== null) {
+                        try {
+                            validateCmd(installCmd);
+                            console.log("📦 Installing dependencies...");
+                            execSync(installCmd, {cwd: agentDir, stdio: "inherit", timeout: 5 * 60 * 1000});
+                            const registryFile = path.join(AGENTS_DIR, "registry.json");
+                            const registry = await loadRegistry();
+                            registry[name].versions[version].installedAt = Date.now();
+                            await fs.writeJson(registryFile, registry, {spaces: 2});
+                        } finally {
+                            await fs.close(lockFd);
+                            await fs.remove(lockFile).catch(() => {});
+                        }
+                    }
+                }
             }
 
             const startCmd = agent.scripts?.start;
@@ -287,21 +377,27 @@ agentCommand
             validateCmd(startCmd);
 
             const containerId = generateId();
-            await fs.ensureDir(resolveContainerPath(containerId));
-            const pid = await spawnProcess(containerId, agentDir, startCmd);
+            const containerDir = resolveContainerPath(containerId);
+            await fs.ensureDir(containerDir);
+            try {
+                const pid = await spawnProcess(containerId, agentDir, startCmd);
 
-            const containers = await loadContainers();
-            containers[containerId] = {
-                containerId,
-                agentId: versionEntry.agentId,
-                name,
-                version,
-                pid,
-                startedAt: Date.now(),
-                status: "running",
-            };
-            await saveContainers(containers);
-            console.log(containerId);
+                const containers = await loadContainers();
+                containers[containerId] = {
+                    containerId,
+                    agentId: versionEntry.agentId,
+                    name,
+                    version,
+                    pid,
+                    startedAt: Date.now(),
+                    status: "running",
+                };
+                await saveContainers(containers);
+                console.log(containerId);
+            } catch (err) {
+                await fs.remove(containerDir).catch(() => {});
+                throw err;
+            }
         } catch (err: any) {
             console.error("❌ Run failed:", err.message);
             process.exit(1);
@@ -314,7 +410,7 @@ agentCommand
     .description("Start a stopped container")
     .action(async (rawId: string) => {
         try {
-            const containerId = sanitizeName(rawId);
+            const containerId = sanitizeContainerId(rawId);
             const containers = await loadContainers();
             const container = containers[containerId];
             if (!container) throw new Error(`Container '${sanitizeLog(containerId)}' not found`);
@@ -327,7 +423,8 @@ agentCommand
             if (!startCmd) throw new Error("No start script defined in agent.json");
             validateCmd(startCmd);
 
-            await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {});
+            await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {
+            });
             const pid = await spawnProcess(containerId, agentDir, startCmd);
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
@@ -357,7 +454,12 @@ async function stopContainer(containerId: string): Promise<void> {
         if (stopCmd) {
             validateCmd(stopCmd);
             const {bin, args} = parseCmd(stopCmd);
-            spawnSync(bin, args, {cwd: agentDir, stdio: "inherit"});
+            const pidData = await fs.readJson(pidFile).catch(() => null);
+            spawnSync(bin, args, {
+                cwd: agentDir,
+                stdio: "inherit",
+                env: {...process.env, AGENT_PID: String(pidData?.pid ?? ""), AGENT_CONTAINER_ID: containerId},
+            });
             await fs.remove(pidFile).catch(() => {});
             containers[containerId].status = "stopped";
             await saveContainers(containers);
@@ -372,14 +474,16 @@ async function stopContainer(containerId: string): Promise<void> {
         if (!Number.isFinite(pidRaw) || pidRaw <= 0) throw new Error("Invalid PID in agent.pid");
         try {
             process.kill(pidRaw, 0);
-            const procStat = path.join("/proc", String(pidRaw), "stat");
-            if (await fs.pathExists(procStat)) {
-                const stat = await fs.readFile(procStat, "utf-8");
-                const startTicks = parseInt(stat.split(" ")[21]);
-                const bootStat = await fs.readFile("/proc/stat", "utf-8");
-                const btime = parseInt(bootStat.split("\n").find(l => l.startsWith("btime"))!.split(" ")[1]);
-                const procStartMs = (btime + startTicks / 100) * 1000;
-                if (procStartMs > pidData.startedAt + 5000) throw new Error("PID reuse detected, refusing to kill");
+            if (process.platform === "linux") {
+                const procStat = path.join("/proc", String(pidRaw), "stat");
+                if (await fs.pathExists(procStat)) {
+                    const stat = await fs.readFile(procStat, "utf-8");
+                    const startTicks = parseInt(stat.split(" ")[21]);
+                    const bootStat = await fs.readFile("/proc/stat", "utf-8");
+                    const btime = parseInt(bootStat.split("\n").find(l => l.startsWith("btime"))!.split(" ")[1]);
+                    const procStartMs = (btime + startTicks / 100) * 1000;
+                    if (procStartMs > pidData.startedAt + 5000) throw new Error("PID reuse detected, refusing to kill");
+                }
             }
             process.kill(pidRaw);
         } catch (e: any) {
@@ -387,10 +491,12 @@ async function stopContainer(containerId: string): Promise<void> {
         }
     } else {
         // process already dead, just clean up
-        await fs.remove(pidFile).catch(() => {});
+        await fs.remove(pidFile).catch(() => {
+        });
     }
 
-    await fs.remove(pidFile).catch(() => {});
+    await fs.remove(pidFile).catch(() => {
+    });
     containers[containerId].status = "stopped";
     await saveContainers(containers);
     console.log(`✅ Container '${sanitizeLog(containerId)}' stopped`);
@@ -398,7 +504,10 @@ async function stopContainer(containerId: string): Promise<void> {
 
 async function resolveContainerId(nameOrId: string, requireSingle = false): Promise<string> {
     const containers = await loadContainers();
-    if (containers[nameOrId]) return nameOrId;
+    // try exact container id match first (validate format), then fall back to name lookup
+    let isId = false;
+    try { sanitizeContainerId(nameOrId); isId = true; } catch { /* not an id format */ }
+    if (isId && containers[nameOrId]) return nameOrId;
     const matches = Object.values(containers as Record<string, any>)
         .filter(c => c.name === nameOrId && isProcessAlive(c.pid));
     if (matches.length === 0) throw new Error(`No running container found for '${sanitizeLog(nameOrId)}'\nUse 'lifectl ai agent ps' to list containers.`);
@@ -415,7 +524,7 @@ agentCommand
     .description("Stop a running container by name or container id")
     .action(async (nameArg: string) => {
         try {
-            const containerId = await resolveContainerId(sanitizeName(nameArg), true);
+            const containerId = await resolveContainerId(nameArg.trim(), true);
             await stopContainer(containerId);
         } catch (err: any) {
             console.error("❌ Stop failed:", err.message);
@@ -429,7 +538,7 @@ agentCommand
     .description("Restart a container")
     .action(async (nameArg: string) => {
         try {
-            const containerId = await resolveContainerId(sanitizeName(nameArg), true);
+            const containerId = await resolveContainerId(nameArg.trim(), true);
             await stopContainer(containerId);
 
             const containers = await loadContainers();
@@ -494,7 +603,8 @@ agentCommand
             let changed = false;
             for (const [cid, c] of Object.entries(allContainers as Record<string, any>)) {
                 if (c.name === name && (!versionArg || c.version === versionArg) && !isProcessAlive(c.pid)) {
-                    await fs.remove(resolveContainerPath(cid)).catch(() => {});
+                    await fs.remove(resolveContainerPath(cid)).catch(() => {
+                    });
                     delete allContainers[cid];
                     changed = true;
                 }
@@ -512,7 +622,7 @@ agentCommand
     .description("Remove a stopped container")
     .action(async (rawId: string) => {
         try {
-            const containerId = sanitizeName(rawId);
+            const containerId = sanitizeContainerId(rawId);
             const containers = await loadContainers();
             const container = containers[containerId];
             if (!container) throw new Error(`Container '${sanitizeLog(containerId)}' not found`);
@@ -534,7 +644,10 @@ agentCommand
     .action(async () => {
         const registry = await loadRegistry();
         const entries = Object.values(registry) as any[];
-        if (entries.length === 0) { console.log("No agents pulled."); return; }
+        if (entries.length === 0) {
+            console.log("No agents pulled.");
+            return;
+        }
 
         const formatDate = (ts: number) => {
             const d = new Date(ts);
@@ -572,7 +685,10 @@ agentCommand
     .action(async () => {
         const containers = await loadContainers();
         const all = Object.values(containers as Record<string, any>);
-        if (all.length === 0) { console.log("No containers."); return; }
+        if (all.length === 0) {
+            console.log("No containers.");
+            return;
+        }
 
         const formatDate = (ts: number) => {
             const d = new Date(ts);
@@ -617,7 +733,7 @@ agentCommand
     .option("-f, --follow", "Follow log output")
     .action(async (nameArg: string, opts: { lines: string; follow?: boolean }) => {
         try {
-            const containerId = await resolveContainerId(sanitizeName(nameArg), true);
+            const containerId = await resolveContainerId(nameArg.trim(), true);
             const logFile = resolveContainerPath(containerId, "agent.log");
 
             if (!await fs.pathExists(logFile)) {
@@ -665,10 +781,23 @@ agentCommand
             const tailLines = collectedStr.split("\n").slice(-lines - 1).join("\n").trimStart();
             if (tailLines) process.stdout.write(tailLines + "\n");
 
-            const watcher = chokidar.watch(logFile, {usePolling: false, persistent: true});
-            watcher.on("change", async () => {
+            const containerDir = resolveContainerPath(containerId);
+            // watch the directory so we detect when logFile is recreated after rotation
+            const watcher = chokidar.watch(containerDir, {
+                usePolling: false,
+                persistent: true,
+                ignoreInitial: true,
+                depth: 0,
+            });
+            watcher.on("add", (filePath) => {
+                // logFile was recreated after rotation — reset position
+                if (filePath === logFile) lastSize = 0;
+            });
+            watcher.on("change", async (filePath) => {
+                if (filePath !== logFile) return;
                 try {
                     const size = (await fs.stat(logFile)).size;
+                    if (size < lastSize) lastSize = 0; // file was truncated/rotated
                     if (size > lastSize) {
                         const rfd = await fs.open(logFile, "r");
                         const buf = Buffer.alloc(size - lastSize);
@@ -677,9 +806,29 @@ agentCommand
                         process.stdout.write(buf.toString("utf-8"));
                         lastSize = size;
                     }
-                } catch { watcher.close(); }
+                } catch {
+                    watcher.close();
+                }
             });
-            process.on("SIGINT", () => { watcher.close(); process.exit(0); });
+
+            // poll process liveness — close watcher when the agent dies
+            const containers = await loadContainers();
+            const containerMeta = containers[containerId];
+            if (containerMeta?.pid) {
+                const aliveInterval = setInterval(() => {
+                    if (!isProcessAlive(containerMeta.pid)) {
+                        clearInterval(aliveInterval);
+                        watcher.close();
+                        process.exit(0);
+                    }
+                }, 2000);
+                watcher.on("close", () => clearInterval(aliveInterval));
+            }
+
+            process.on("SIGINT", () => {
+                watcher.close();
+                process.exit(0);
+            });
         } catch (err: any) {
             console.error("❌ Log failed:", err.message);
             process.exit(1);
