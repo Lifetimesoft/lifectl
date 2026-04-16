@@ -1,8 +1,8 @@
 # lifectl
 
-> Run AI agents like running containers.
+> Run AI agents easily — powered by Lifetimesoft CLI platform.
 
-**lifectl** is a CLI tool for pulling, running, and managing AI agents — locally or from a remote registry.
+**lifectl** is a CLI tool for running and managing AI agents with a Docker-like experience, built on top of a scalable SaaS platform.
 
 ---
 
@@ -27,18 +27,41 @@
 npm install -g lifectl
 ```
 
----
-
-## 📚 Commands
-
-### Auth
+### Run your first agent
 
 ```bash
-lifectl auth login       # Login via browser
-lifectl auth logout      # Logout
+lifectl auth login
+lifectl ai agent run hello-world-agent
+lifectl ai agent ps
 ```
 
-### AI Agent — Image
+---
+
+## 🧩 CLI Structure
+
+lifectl is organized into apps and sub-commands:
+
+```bash
+lifectl <app> <sub-app> <command>
+```
+
+### Apps
+
+* `auth` → Authentication
+* `ai` → AI services
+
+### Example
+
+```bash
+lifectl auth login
+lifectl ai agent run hello-world
+```
+
+---
+
+## 🤖 AI Module
+
+### Agent — Image Management
 
 ```bash
 lifectl ai agent pull <name>          # Pull agent from registry
@@ -49,26 +72,33 @@ lifectl ai agent rma <name>           # Remove agent (all versions)
 lifectl ai agent rma <name>:<ver>     # Remove specific version
 ```
 
-### AI Agent — Container
+---
+
+### Agent — Container Management
 
 ```bash
 lifectl ai agent run <name>                      # Run agent (pull if needed)
 lifectl ai agent run <name>:<ver>                # Run specific version
 lifectl ai agent run <name> --name <alias>       # Run with a custom container name
+
 lifectl ai agent ps                              # List all containers
 lifectl ai agent ps --name <name>                # Filter by agent name or alias
-lifectl ai agent ps --status running             # Filter by status: running | stopped
-lifectl ai agent ps --name <name> --status stopped  # Combine filters
+lifectl ai agent ps --status running             # Filter by status
+lifectl ai agent ps --name <name> --status stopped
+
 lifectl ai agent start <containerId>             # Start a stopped container
 lifectl ai agent stop <name|alias|containerId>   # Stop a container
 lifectl ai agent restart <name|alias|containerId># Restart a container
 lifectl ai agent rm <containerId>                # Remove a stopped container
-lifectl ai agent logs <name|alias|containerId>   # Show last 50 lines of log
+
+lifectl ai agent logs <name|alias|containerId>   # Show logs
 lifectl ai agent logs <name> -n 100              # Show last N lines
-lifectl ai agent logs <name> -f                  # Follow log output (auto-stops when process exits)
+lifectl ai agent logs <name> -f                  # Follow logs
 ```
 
-#### Named containers
+---
+
+### Named containers
 
 Assign a custom name to a container for easier management:
 
@@ -78,7 +108,9 @@ lifectl ai agent logs web
 lifectl ai agent stop web
 ```
 
-#### Example output of `list`
+---
+
+### Example output of `list`
 
 ```
 AGENT ID      NAME               VERSION  RUNTIME  PULLED AT
@@ -86,7 +118,9 @@ a3f9c12b4e07  hello-world-agent  1.0.0    node     06/04/2026 20:09
 b7d2e45f1c08  my-other-agent     2.1.0    python   05/04/2026 15:30
 ```
 
-#### Example output of `ps`
+---
+
+### Example output of `ps`
 
 ```
 CONTAINER ID  AGENT ID      NAME                        VERSION  STATUS      PID    STARTED AT
@@ -94,7 +128,9 @@ a3f9c12b4e07  b7d2e45f1c08  hello-world-agent (web)     1.0.0    🟢 running  1
 c1e8f23a9d05  b7d2e45f1c08  hello-world-agent           1.0.0    ⚫ stopped  12346  05/04/2026 15:30
 ```
 
-#### Allowed runtimes
+---
+
+### Allowed runtimes
 
 Agents can only use these runtimes in `agent.json` scripts:
 
@@ -109,7 +145,7 @@ node  python  python3  deno  bun  npx  ts-node  tsx
 ```
 ~/.lifectl/
   agents/
-    registry.json          ← image registry
+    registry.json          ← agent registry (local)
     <name>/<version>/      ← agent files
       agent.json
       .install.lock        ← prevents concurrent installs
@@ -118,13 +154,27 @@ node  python  python3  deno  bun  npx  ts-node  tsx
     <containerId>/         ← per-process folder
       agent.pid
       agent.log
-      agent.log.1          ← rotated logs (up to 5 files, 10MB each)
+      agent.log.1          ← rotated logs
 ```
 
-* **lifectl CLI** → control agents
-* **Agent Registry** → store & version agents
-* **Container Runtime** → isolated process per run
-* **SaaS Platform** → monitoring & management
+**Concepts:**
+
+* **lifectl CLI** → entry point for all apps
+* **Agent Registry** → stores versioned agents
+* **Container Runtime** → runs agents as isolated processes
+* **SaaS Platform** → authentication & future services
+
+---
+
+## 🔮 Future Apps
+
+lifectl is designed as a modular CLI platform.
+
+Upcoming apps:
+
+* `deploy` → Deploy applications
+* `logs` → Centralized logging
+* `billing` → Usage and cost management
 
 ---
 
@@ -135,35 +185,30 @@ node  python  python3  deno  bun  npx  ts-node  tsx
 * [x] Agent registry (push/publish)
 * [x] Agent pull system
 * [x] Versioned agents
-* [x] Local agent registry (registry.json)
+* [x] Local agent registry
 * [x] Agent runtime (local execution)
-* [x] Agent process manager (PID-based)
-* [x] Docker-style container model (run/start/stop/ps/rm)
-* [x] Agent image management (list/rma)
-* [x] Log rotation (up to 5 files × 10MB)
+* [x] Container model (run/start/stop/ps/rm)
+* [x] Log rotation
 * [x] Multi-container per agent
-* [x] Named containers (`--name`)
-* [x] Container filtering (`ps --name`, `ps --status`)
-* [x] Follow log with auto-exit on process death
+* [x] Named containers
+* [x] Container filtering
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
-* [ ] Agent environment variables support
-* [ ] Run agent on sandbox
+* [ ] Environment variables support
+* [ ] Sandbox execution
 
 ---
 
 ## 🔐 Security
 
 * Token-based authentication
-* No credentials stored in plain text
-* Runtime whitelist — only `node`, `python`, `python3`, `deno`, `bun`, `npx`, `ts-node`, `tsx` are allowed
-* PID reuse detection — verifies process start time before kill (Linux)
-* tar path traversal protection — blocks `..` entries during agent extraction
-* Shell metacharacter blocking — `;`, `&`, `|`, `` ` ``, `$`, `<`, `>`
-* Path traversal protection — agents are isolated under `~/.lifectl/agents/`
-* PID validation before kill — prevents stale or invalid PID attacks
-* Atomic install lock — `O_EXCL` file lock prevents concurrent dependency installs
-* Atomic container writes — write-queue + temp file rename prevents `containers.json` corruption
+* Runtime whitelist enforcement
+* Shell metacharacter blocking
+* Path traversal protection
+* PID validation before kill
+* PID reuse detection (Linux)
+* Atomic install lock (prevents concurrent install)
+* Atomic container writes (prevents corruption)
 
 ---
 
@@ -176,8 +221,6 @@ APIs and features may change.
 ---
 
 ## 🤝 Contributing
-
-Contributions are welcome!
 
 ```bash
 git clone https://github.com/lifetimesoft/lifectl
@@ -194,7 +237,7 @@ Apache-2.0 license
 
 ---
 
-## 🌐 LifetimeSoft
+## 🌐 Lifetimesoft
 
 Building tools for AI automation and agent-based systems.
 

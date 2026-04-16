@@ -75,7 +75,7 @@ function sleep(ms: number) {
 function isTokenExpired(token: string): boolean {
     try {
         const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
-        return Date.now() >= payload.exp * 1000;
+        return Math.floor(Date.now() / 1000) >= payload.exp;
     } catch {
         return true;
     }
