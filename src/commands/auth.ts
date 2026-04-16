@@ -17,10 +17,20 @@ authCommand
         try {
             const cfg = await getConfig();
             if (cfg?.access_token && !isTokenExpired(cfg.access_token)) {
-                console.log("✅ Already logged in.");
-                return;
-            }
-            if (cfg?.refresh_token) {
+                // token ยังไม่ expired ฝั่ง client แต่ refresh token อาจหมดแล้ว
+                // ลอง verify กับ server ก่อน ถ้า refresh ไม่ได้ให้ login ใหม่
+                if (cfg?.refresh_token) {
+                    const refreshed = await tryRefresh(cfg.refresh_token);
+                    if (refreshed) {
+                        console.log("✅ Already logged in.");
+                        return;
+                    }
+                    // refresh ไม่ได้ → session หมดแล้ว ต้อง login ใหม่
+                } else {
+                    console.log("✅ Already logged in.");
+                    return;
+                }
+            } else if (cfg?.refresh_token) {
                 const refreshed = await tryRefresh(cfg.refresh_token);
                 if (refreshed) {
                     console.log("✅ Already logged in (token refreshed).");
