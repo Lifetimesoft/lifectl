@@ -241,6 +241,8 @@ Apache-2.0 license
 
 Building tools for AI automation and agent-based systems.
 
+* [`@lifetimesoft/agent-sdk`](https://www.npmjs.com/package/@lifetimesoft/agent-sdk) – SDK for building portable AI agents
+
 ---
 
 ## ⭐ Support
