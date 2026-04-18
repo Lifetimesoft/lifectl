@@ -1,5 +1,5 @@
 import {Command} from "commander";
-import {execSync, spawn, spawnSync} from "child_process";
+import {execSync, spawn} from "child_process";
 import fs from "fs-extra";
 import path from "path";
 import os from "os";
@@ -13,8 +13,6 @@ import {getConfig} from "../utils/config.js";
 
 const AGENTS_DIR = path.join(os.homedir(), ".lifectl", "agents");
 const CONTAINERS_DIR = path.join(os.homedir(), ".lifectl", "containers");
-
-const ALLOWED_RUNTIMES = new Set(["node", "python", "python3", "deno", "bun", "npx", "ts-node", "tsx"]);
 
 const CONTAINER_ID_BYTES = 6;
 const CONTAINER_ID_REGEX = /^[a-f0-9]{12}$/; // CONTAINER_ID_BYTES * 2
@@ -49,12 +47,6 @@ function sanitizeContainerId(id: string): string {
 
 function sanitizeLog(s: string): string {
     return String(s).replace(/[\r\n]/g, " ");
-}
-
-function validateCmd(cmd: string): void {
-    if (/[;&|`$<>]/.test(cmd)) throw new Error("Invalid characters in script command");
-    const {bin} = parseCmd(cmd);
-    if (!ALLOWED_RUNTIMES.has(path.basename(bin))) throw new Error(`Command must start with an allowed runtime. Allowed: ${[...ALLOWED_RUNTIMES].join(", ")}`);
 }
 
 function parseCmd(cmd: string): { bin: string; args: string[] } {
@@ -469,11 +461,35 @@ agentCommand
 
             const agentDir = agentPath(container.name, container.version);
 
+            // call SaaS to register new run and get fresh ctx
+            console.log("🔗 Registering agent run with SaaS...");
+            const runRes = await apiAi.post("/agents/run", {
+                agent_name: container.name,
+                agent_version: container.version,
+                container_id: containerId,
+                hostname: os.hostname(),
+                alias: container.alias ?? null,
+            });
+            const runData = runRes.data;
+            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent run");
+
+            const { ctx } = runData;
+            const run_id: string = ctx.meta.run_id;
+            const cfg = await getConfig();
+            const agentEnv: Record<string, string> = {
+                AGENT_RUN_ID: run_id,
+                AGENT_NAME: container.name,
+                AGENT_VERSION: container.version,
+                AGENT_CTX: JSON.stringify(ctx),
+                AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+            };
+
             await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {});
-            const pid = await spawnProcess(containerId, agentDir, "agent-runtime");
+            const pid = await spawnProcess(containerId, agentDir, "agent-runtime", agentEnv);
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
+            containers[containerId].run_id = run_id;
             await saveContainers(containers);
             console.log(`✅ Container '${sanitizeLog(containerId)}' started (pid: ${pid})`);
         } catch (err: any) {
@@ -567,10 +583,34 @@ agentCommand
             const container = containers[containerId];
             const agentDir = agentPath(container.name, container.version);
 
-            const pid = await spawnProcess(containerId, agentDir, "agent-runtime");
+            // call SaaS to register new run and get fresh ctx
+            console.log("🔗 Registering agent run with SaaS...");
+            const runRes = await apiAi.post("/agents/run", {
+                agent_name: container.name,
+                agent_version: container.version,
+                container_id: containerId,
+                hostname: os.hostname(),
+                alias: container.alias ?? null,
+            });
+            const runData = runRes.data;
+            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent run");
+
+            const { ctx } = runData;
+            const run_id: string = ctx.meta.run_id;
+            const cfg = await getConfig();
+            const agentEnv: Record<string, string> = {
+                AGENT_RUN_ID: run_id,
+                AGENT_NAME: container.name,
+                AGENT_VERSION: container.version,
+                AGENT_CTX: JSON.stringify(ctx),
+                AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+            };
+
+            const pid = await spawnProcess(containerId, agentDir, "agent-runtime", agentEnv);
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
+            containers[containerId].run_id = run_id;
             await saveContainers(containers);
 
             console.log(`✅ Container '${sanitizeLog(containerId)}' restarted (pid: ${pid})`);
