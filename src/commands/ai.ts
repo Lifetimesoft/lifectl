@@ -431,12 +431,14 @@ agentCommand
                 const runData = runRes.data;
                 if (!runData.success) throw new Error(runData.message ?? "Failed to register agent run");
 
-                const { run_id, job_id, ctx } = runData;
+                const { ctx } = runData;
+                const run_id: string = ctx.meta.run_id;
+                const job_id: string = ctx.meta.job_id;
 
                 // inject ctx as env vars so agent process can read them
                 const agentEnv: Record<string, string> = {
                     AGENT_RUN_ID: run_id,
-                    AGENT_JOB_ID: job_id,
+                    AGENT_JOB_ID: job_id ?? "",
                     AGENT_NAME: name,
                     AGENT_VERSION: version,
                     AGENT_CTX: JSON.stringify(ctx),
