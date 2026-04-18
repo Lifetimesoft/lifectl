@@ -9,6 +9,7 @@ import {apiAi} from "../utils/api-ai.js";
 import {minimatch} from "minimatch";
 import chokidar from "chokidar";
 import crypto from "crypto";
+import {getConfig} from "../utils/config.js";
 
 const AGENTS_DIR = path.join(os.homedir(), ".lifectl", "agents");
 const CONTAINERS_DIR = path.join(os.homedir(), ".lifectl", "containers");
@@ -278,39 +279,6 @@ async function rotateLog(logFile: string): Promise<void> {
     await fs.move(logFile, `${logFile}.1`, {overwrite: true});
 }
 
-const HEARTBEAT_INTERVAL_MS = 20_000; // 20s
-
-function startHeartbeat(containerId: string, run_id: string, pid: number): void {
-    const interval = setInterval(async () => {
-        try {
-            // check if process is still alive
-            const alive = isProcessAlive(pid);
-            if (!alive) {
-                clearInterval(interval);
-                // notify SaaS agent has stopped
-                await apiAi.post("/agents/stopped", { run_id }).catch(() => {});
-                // update local container status
-                const containers = await loadContainers();
-                if (containers[containerId]) {
-                    containers[containerId].status = "stopped";
-                    await saveContainers(containers);
-                }
-                return;
-            }
-            // send heartbeat — status RUNNING = 1
-            await apiAi.post("/agents/heartbeat", {
-                run_id,
-                status: 1,
-            });
-        } catch {
-            // heartbeat failure is non-fatal — agent keeps running
-        }
-    }, HEARTBEAT_INTERVAL_MS);
-
-    // allow process to exit without waiting for interval
-    interval.unref();
-}
-
 async function spawnProcess(containerId: string, agentDir: string, startCmd: string, env?: Record<string, string>): Promise<number> {
     const containerDir = resolveContainerPath(containerId);
     const logFile = path.join(containerDir, "agent.log");
@@ -435,15 +403,19 @@ agentCommand
                 const { ctx } = runData;
                 const run_id: string = ctx.meta.run_id;
 
-                // inject ctx as env vars so agent process can read them
+                // runtime wrapper handles heartbeat and lifecycle inside the agent process
+                // agent-sdk/runtime reads AGENT_CTX, runs agent.run(ctx), sends heartbeat
+                const cfg = await getConfig();
+                const runtimeCmd = "node node_modules/@lifetimesoft/agent-sdk/dist/runtime.js";
                 const agentEnv: Record<string, string> = {
                     AGENT_RUN_ID: run_id,
                     AGENT_NAME: name,
                     AGENT_VERSION: version,
                     AGENT_CTX: JSON.stringify(ctx),
+                    AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
                 };
 
-                const pid = await spawnProcess(containerId, agentDir, startCmd, agentEnv);
+                const pid = await spawnProcess(containerId, agentDir, runtimeCmd, agentEnv);
 
                 const containers = await loadContainers();
                 if (alias && Object.values(containers as Record<string, any>).some(c => c.alias === alias)) {
@@ -461,9 +433,6 @@ agentCommand
                     run_id,
                 };
                 await saveContainers(containers);
-
-                // start heartbeat loop (every 20s) in background
-                startHeartbeat(containerId, run_id, pid);
 
                 console.log(containerId);
             } catch (err) {
