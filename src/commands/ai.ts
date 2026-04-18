@@ -278,7 +278,40 @@ async function rotateLog(logFile: string): Promise<void> {
     await fs.move(logFile, `${logFile}.1`, {overwrite: true});
 }
 
-async function spawnProcess(containerId: string, agentDir: string, startCmd: string): Promise<number> {
+const HEARTBEAT_INTERVAL_MS = 20_000; // 20s
+
+function startHeartbeat(containerId: string, run_id: string, pid: number): void {
+    const interval = setInterval(async () => {
+        try {
+            // check if process is still alive
+            const alive = isProcessAlive(pid);
+            if (!alive) {
+                clearInterval(interval);
+                // notify SaaS agent has stopped
+                await apiAi.post("/agents/stopped", { run_id }).catch(() => {});
+                // update local container status
+                const containers = await loadContainers();
+                if (containers[containerId]) {
+                    containers[containerId].status = "stopped";
+                    await saveContainers(containers);
+                }
+                return;
+            }
+            // send heartbeat — status RUNNING = 1
+            await apiAi.post("/agents/heartbeat", {
+                run_id,
+                status: 1,
+            });
+        } catch {
+            // heartbeat failure is non-fatal — agent keeps running
+        }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    // allow process to exit without waiting for interval
+    interval.unref();
+}
+
+async function spawnProcess(containerId: string, agentDir: string, startCmd: string, env?: Record<string, string>): Promise<number> {
     const containerDir = resolveContainerPath(containerId);
     const logFile = path.join(containerDir, "agent.log");
     const pidFile = path.join(containerDir, "agent.pid");
@@ -287,7 +320,12 @@ async function spawnProcess(containerId: string, agentDir: string, startCmd: str
     let child;
     try {
         const {bin: cmd, args} = parseCmd(startCmd);
-        child = spawn(cmd, args, {cwd: agentDir, detached: true, stdio: ["ignore", logFd, logFd]});
+        child = spawn(cmd, args, {
+            cwd: agentDir,
+            detached: true,
+            stdio: ["ignore", logFd, logFd],
+            env: {...process.env, ...env},
+        });
     } finally {
         fs.closeSync(logFd);
     }
@@ -382,7 +420,29 @@ agentCommand
             const containerDir = resolveContainerPath(containerId);
             await fs.ensureDir(containerDir);
             try {
-                const pid = await spawnProcess(containerId, agentDir, startCmd);
+                // call SaaS to register run and get ctx + config
+                console.log("🔗 Registering agent run with SaaS...");
+                const runRes = await apiAi.post("/agents/run", {
+                    agent_name: name,
+                    agent_version: version,
+                    container_id: containerId,
+                    hostname: os.hostname(),
+                });
+                const runData = runRes.data;
+                if (!runData.success) throw new Error(runData.message ?? "Failed to register agent run");
+
+                const { run_id, job_id, ctx } = runData;
+
+                // inject ctx as env vars so agent process can read them
+                const agentEnv: Record<string, string> = {
+                    AGENT_RUN_ID: run_id,
+                    AGENT_JOB_ID: job_id,
+                    AGENT_NAME: name,
+                    AGENT_VERSION: version,
+                    AGENT_CTX: JSON.stringify(ctx),
+                };
+
+                const pid = await spawnProcess(containerId, agentDir, startCmd, agentEnv);
 
                 const containers = await loadContainers();
                 if (alias && Object.values(containers as Record<string, any>).some(c => c.alias === alias)) {
@@ -397,8 +457,14 @@ agentCommand
                     pid,
                     startedAt: Date.now(),
                     status: "running",
+                    run_id,
+                    job_id,
                 };
                 await saveContainers(containers);
+
+                // start heartbeat loop (every 20s) in background
+                startHeartbeat(containerId, run_id, pid);
+
                 console.log(containerId);
             } catch (err) {
                 await fs.remove(containerDir).catch(() => {});
