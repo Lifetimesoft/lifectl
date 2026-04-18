@@ -19,6 +19,19 @@ const ALLOWED_RUNTIMES = new Set(["node", "python", "python3", "deno", "bun", "n
 const CONTAINER_ID_BYTES = 6;
 const CONTAINER_ID_REGEX = /^[a-f0-9]{12}$/; // CONTAINER_ID_BYTES * 2
 
+/**
+ * Detect the package manager to use for installing dependencies.
+ * Priority: bun > pnpm > yarn > npm (fallback)
+ * Handles repos that have multiple lock files (e.g. yarn.lock + package-lock.json).
+ */
+async function detectPackageManager(agentDir: string): Promise<{ bin: string; args: string[] }> {
+    if (await fs.pathExists(path.join(agentDir, "bun.lockb"))) return { bin: "bun", args: ["install"] };
+    if (await fs.pathExists(path.join(agentDir, "pnpm-lock.yaml"))) return { bin: "pnpm", args: ["install"] };
+    if (await fs.pathExists(path.join(agentDir, "yarn.lock"))) return { bin: "yarn", args: ["install"] };
+    if (await fs.pathExists(path.join(agentDir, "package-lock.json"))) return { bin: "npm", args: ["install"] };
+    return { bin: "npm", args: ["install"] }; // fallback
+}
+
 function generateId(): string {
     return crypto.randomBytes(CONTAINER_ID_BYTES).toString("hex");
 }
@@ -339,50 +352,47 @@ agentCommand
             const agentJson = path.join(agentDir, "agent.json");
             const agent = await fs.readJson(agentJson);
 
-            const installCmd = agent.scripts?.install;
-            if (installCmd) {
-                const versionEntry = entry.versions[version];
-                if (!versionEntry.installedAt) {
-                    const lockFile = path.join(agentDir, ".install.lock");
-                    // atomic exclusive create — fails if another process already holds the lock
-                    let lockFd: number | null = null;
-                    try {
-                        lockFd = await fs.open(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
-                    } catch {
-                        // another instance is installing — wait for it to finish then skip
-                        console.log("⏳ Another instance is installing dependencies, waiting...");
-                        while (await fs.pathExists(lockFile)) {
-                            await new Promise(r => setTimeout(r, 500));
-                        }
-                        // re-read registry to check if install completed
-                        const freshRegistry = await loadRegistry();
-                        if (freshRegistry[name]?.versions[version]?.installedAt) {
-                            // already installed by the other instance
-                        } else {
-                            throw new Error("Install lock released but installedAt not set — install may have failed");
-                        }
-                        lockFd = null;
+            // require package.json — agent must use @lifetimesoft/agent-sdk
+            const pkgJsonPath = path.join(agentDir, "package.json");
+            if (!await fs.pathExists(pkgJsonPath)) {
+                throw new Error("Agent must have a package.json with @lifetimesoft/agent-sdk as a dependency.");
+            }
+
+            // install dependencies if not yet installed
+            if (!versionEntry.installedAt) {
+                const lockFile = path.join(agentDir, ".install.lock");
+                let lockFd: number | null = null;
+                try {
+                    lockFd = await fs.open(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+                } catch {
+                    console.log("⏳ Another instance is installing dependencies, waiting...");
+                    while (await fs.pathExists(lockFile)) {
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                    if (lockFd !== null) {
-                        try {
-                            validateCmd(installCmd);
-                            console.log("📦 Installing dependencies...");
-                            execSync(installCmd, {cwd: agentDir, stdio: "inherit", timeout: 5 * 60 * 1000});
-                            const registryFile = path.join(AGENTS_DIR, "registry.json");
-                            const registry = await loadRegistry();
-                            registry[name].versions[version].installedAt = Date.now();
-                            await fs.writeJson(registryFile, registry, {spaces: 2});
-                        } finally {
-                            await fs.close(lockFd);
-                            await fs.remove(lockFile).catch(() => {});
-                        }
+                    const freshRegistry = await loadRegistry();
+                    if (!freshRegistry[name]?.versions[version]?.installedAt) {
+                        throw new Error("Install lock released but installedAt not set — install may have failed");
+                    }
+                    lockFd = null;
+                }
+                if (lockFd !== null) {
+                    try {
+                        const pm = await detectPackageManager(agentDir);
+                        console.log(`📦 Installing dependencies with ${pm.bin}...`);
+                        execSync(`${pm.bin} ${pm.args.join(" ")}`, {cwd: agentDir, stdio: "inherit", timeout: 5 * 60 * 1000});
+                        const registryFile = path.join(AGENTS_DIR, "registry.json");
+                        const reg = await loadRegistry();
+                        reg[name].versions[version].installedAt = Date.now();
+                        await fs.writeJson(registryFile, reg, {spaces: 2});
+                    } finally {
+                        await fs.close(lockFd);
+                        await fs.remove(lockFile).catch(() => {});
                     }
                 }
             }
 
-            const startCmd = agent.scripts?.start;
-            if (!startCmd) throw new Error("No start script defined in agent.json");
-            validateCmd(startCmd);
+            // always use agent-runtime as the start command
+            const startCmd = "agent-runtime";
 
             const containerId = generateId();
             const containerDir = resolveContainerPath(containerId);
@@ -458,15 +468,9 @@ agentCommand
             if (isProcessAlive(container.pid)) throw new Error(`Container '${sanitizeLog(containerId)}' is already running`);
 
             const agentDir = agentPath(container.name, container.version);
-            const agentJson = path.join(agentDir, "agent.json");
-            const agent = await fs.readJson(agentJson);
-            const startCmd = agent.scripts?.start;
-            if (!startCmd) throw new Error("No start script defined in agent.json");
-            validateCmd(startCmd);
 
-            await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {
-            });
-            const pid = await spawnProcess(containerId, agentDir, startCmd);
+            await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {});
+            const pid = await spawnProcess(containerId, agentDir, "agent-runtime");
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
@@ -485,29 +489,6 @@ async function stopContainer(containerId: string): Promise<void> {
 
     const containerDir = resolveContainerPath(containerId);
     const pidFile = path.join(containerDir, "agent.pid");
-
-    // try stop script first
-    const agentDir = agentPath(container.name, container.version);
-    const agentJson = path.join(agentDir, "agent.json");
-    if (await fs.pathExists(agentJson)) {
-        const agent = await fs.readJson(agentJson);
-        const stopCmd = agent.scripts?.stop;
-        if (stopCmd) {
-            validateCmd(stopCmd);
-            const {bin, args} = parseCmd(stopCmd);
-            const pidData = await fs.readJson(pidFile).catch(() => null);
-            spawnSync(bin, args, {
-                cwd: agentDir,
-                stdio: "inherit",
-                env: {...process.env, AGENT_PID: String(pidData?.pid ?? ""), AGENT_CONTAINER_ID: containerId},
-            });
-            await fs.remove(pidFile).catch(() => {});
-            containers[containerId].status = "stopped";
-            await saveContainers(containers);
-            console.log(`✅ Container '${sanitizeLog(containerId)}' stopped`);
-            return;
-        }
-    }
 
     if (await fs.pathExists(pidFile)) {
         const pidData = await fs.readJson(pidFile);
@@ -585,13 +566,8 @@ agentCommand
             const containers = await loadContainers();
             const container = containers[containerId];
             const agentDir = agentPath(container.name, container.version);
-            const agentJson = path.join(agentDir, "agent.json");
-            const agent = await fs.readJson(agentJson);
-            const startCmd = agent.scripts?.start;
-            if (!startCmd) throw new Error("No start script defined in agent.json");
-            validateCmd(startCmd);
 
-            const pid = await spawnProcess(containerId, agentDir, startCmd);
+            const pid = await spawnProcess(containerId, agentDir, "agent-runtime");
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
