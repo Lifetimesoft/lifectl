@@ -403,10 +403,10 @@ agentCommand
                 const { ctx } = runData;
                 const run_id: string = ctx.meta.run_id;
 
-                // runtime wrapper handles heartbeat and lifecycle inside the agent process
-                // agent-sdk/runtime reads AGENT_CTX, runs agent.run(ctx), sends heartbeat
+                // spawn agent using its own startCmd — each agent language/runtime uses its own command
+                // AGENT_CTX contains meta.runtime with heartbeat URLs from SaaS
+                // heartbeat is managed inside the agent process (via agent-sdk/runtime or equivalent)
                 const cfg = await getConfig();
-                const runtimeCmd = "node node_modules/@lifetimesoft/agent-sdk/dist/runtime.js";
                 const agentEnv: Record<string, string> = {
                     AGENT_RUN_ID: run_id,
                     AGENT_NAME: name,
@@ -415,7 +415,7 @@ agentCommand
                     AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
                 };
 
-                const pid = await spawnProcess(containerId, agentDir, runtimeCmd, agentEnv);
+                const pid = await spawnProcess(containerId, agentDir, startCmd, agentEnv);
 
                 const containers = await loadContainers();
                 if (alias && Object.values(containers as Record<string, any>).some(c => c.alias === alias)) {
