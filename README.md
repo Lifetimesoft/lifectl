@@ -132,11 +132,19 @@ c1e8f23a9d05  b7d2e45f1c08  hello-world-agent           1.0.0    ⚫ stopped  12
 
 ### Allowed runtimes
 
-Agents can only use these runtimes in `agent.json` scripts:
+Agents are started via `agent-runtime` (from `@lifetimesoft/agent-sdk`) automatically — no need to specify a start command in `agent.json`.
 
-```
-node  python  python3  deno  bun  npx  ts-node  tsx
-```
+Dependencies are installed automatically based on the lock file detected in the agent directory:
+
+| Lock file | Package manager |
+|---|---|
+| `bun.lockb` | `bun install` |
+| `pnpm-lock.yaml` | `pnpm install` |
+| `yarn.lock` | `yarn install` |
+| `package-lock.json` | `npm install` |
+| *(none)* | `npm install` (fallback) |
+
+If multiple lock files exist, the highest priority one wins.
 
 ---
 
@@ -192,6 +200,9 @@ Upcoming apps:
 * [x] Multi-container per agent
 * [x] Named containers
 * [x] Container filtering
+* [x] Auto package manager detection (bun/pnpm/yarn/npm)
+* [x] SaaS integration (ctx, WebSocket heartbeat, lifecycle)
+* [x] WebSocket Hibernation for agent heartbeat (near-zero cost)
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
 * [ ] Environment variables support
@@ -202,12 +213,11 @@ Upcoming apps:
 ## 🔐 Security
 
 * Token-based authentication
-* Runtime whitelist enforcement
 * Shell metacharacter blocking
 * Path traversal protection
 * PID validation before kill
 * PID reuse detection (Linux)
-* Atomic install lock (prevents concurrent install)
+* Atomic install lock (prevents concurrent installs)
 * Atomic container writes (prevents corruption)
 
 ---
@@ -240,6 +250,8 @@ Apache-2.0 license
 ## 🌐 Lifetimesoft
 
 Building tools for AI automation and agent-based systems.
+
+* [`@lifetimesoft/agent-sdk`](https://www.npmjs.com/package/@lifetimesoft/agent-sdk) – SDK for building portable AI agents
 
 ---
 
