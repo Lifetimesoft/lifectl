@@ -201,7 +201,8 @@ Upcoming apps:
 * [x] Named containers
 * [x] Container filtering
 * [x] Auto package manager detection (bun/pnpm/yarn/npm)
-* [x] SaaS integration (ctx, heartbeat, lifecycle)
+* [x] SaaS integration (ctx, WebSocket heartbeat, lifecycle)
+* [x] WebSocket Hibernation for agent heartbeat (near-zero cost)
 * [ ] SaaS dashboard integration
 * [ ] Multi-agent workflows
 * [ ] Environment variables support
