@@ -415,6 +415,7 @@ agentCommand
                     AGENT_VERSION: version,
                     AGENT_CTX: JSON.stringify(ctx),
                     AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+                    AGENT_REFRESH_TOKEN: cfg?.refresh_token ?? "",
                 };
 
                 const pid = await spawnProcess(containerId, agentDir, startCmd, agentEnv);
@@ -482,6 +483,7 @@ agentCommand
                 AGENT_VERSION: container.version,
                 AGENT_CTX: JSON.stringify(ctx),
                 AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+                AGENT_REFRESH_TOKEN: cfg?.refresh_token ?? "",
             };
 
             await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {});
@@ -604,6 +606,7 @@ agentCommand
                 AGENT_VERSION: container.version,
                 AGENT_CTX: JSON.stringify(ctx),
                 AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+                AGENT_REFRESH_TOKEN: cfg?.refresh_token ?? "",
             };
 
             const pid = await spawnProcess(containerId, agentDir, "agent-runtime", agentEnv);
