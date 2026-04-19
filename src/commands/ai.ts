@@ -284,6 +284,53 @@ async function rotateLog(logFile: string): Promise<void> {
     await fs.move(logFile, `${logFile}.1`, {overwrite: true});
 }
 
+/**
+ * On Windows, npm bin wrappers are .cmd files that cannot be spawned with detached:true.
+ * This resolves the actual JS file the .cmd points to so we can invoke it with node directly.
+ * Reads the target package's package.json "bin" field to find the JS entrypoint.
+ */
+function resolveNodeBinScript(cmdPath: string, agentDir: string): string | null {
+    try {
+        // e.g. cmdPath = ".../.bin/agent-runtime.cmd"  →  binName = "agent-runtime"
+        const binName = path.basename(cmdPath).replace(/\.cmd$/i, "");
+        const nmDir = path.join(agentDir, "node_modules");
+
+        // collect all package dirs to check (flat + scoped)
+        const pkgDirs: string[] = [];
+        for (const entry of fs.readdirSync(nmDir)) {
+            if (entry.startsWith(".")) continue;
+            const full = path.join(nmDir, entry);
+            if (entry.startsWith("@")) {
+                // scoped scope dir — add each package inside it
+                try {
+                    for (const scoped of fs.readdirSync(full)) {
+                        pkgDirs.push(path.join(full, scoped));
+                    }
+                } catch { /* skip */ }
+            } else {
+                pkgDirs.push(full);
+            }
+        }
+
+        for (const pkgDir of pkgDirs) {
+            const pkgJson = path.join(pkgDir, "package.json");
+            if (!fs.existsSync(pkgJson)) continue;
+            let pkg: any;
+            try { pkg = JSON.parse(fs.readFileSync(pkgJson, "utf-8")); } catch { continue; }
+            const binField = pkg.bin;
+            if (!binField) continue;
+            const binValue: string | undefined =
+                typeof binField === "string" ? binField : binField[binName];
+            if (!binValue) continue;
+            const jsPath = path.resolve(pkgDir, binValue);
+            if (fs.existsSync(jsPath)) return jsPath;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 async function spawnProcess(containerId: string, agentDir: string, startCmd: string, env?: Record<string, string>): Promise<number> {
     const containerDir = resolveContainerPath(containerId);
     const logFile = path.join(containerDir, "agent.log");
@@ -292,8 +339,27 @@ async function spawnProcess(containerId: string, agentDir: string, startCmd: str
     const logFd = fs.openSync(logFile, "a");
     let child;
     try {
-        const {bin: cmd, args} = parseCmd(startCmd);
-        child = spawn(cmd, args, {
+        let bin: string;
+        let args: string[];
+        if (process.platform === "win32" && (startCmd.endsWith(".cmd") || startCmd.endsWith(".CMD"))) {
+            // On Windows, .cmd files cannot be spawned with detached:true directly.
+            // Resolve the actual JS entrypoint from the bin field in the package's package.json
+            // and invoke it with node instead.
+            const resolvedJs = resolveNodeBinScript(startCmd, agentDir);
+            if (resolvedJs) {
+                bin = process.execPath; // node
+                args = [resolvedJs];
+            } else {
+                // fallback: use cmd.exe /c (won't be truly detached but won't EINVAL)
+                bin = process.env.ComSpec ?? "cmd.exe";
+                args = ["/c", startCmd];
+            }
+        } else {
+            const parsed = parseCmd(startCmd);
+            bin = parsed.bin;
+            args = parsed.args;
+        }
+        child = spawn(bin, args, {
             cwd: agentDir,
             detached: true,
             stdio: ["ignore", logFd, logFd],
@@ -383,8 +449,11 @@ agentCommand
                 }
             }
 
-            // always use agent-runtime as the start command
-            const startCmd = "agent-runtime";
+            // resolve agent-runtime from the agent's local node_modules/.bin so it works
+            // without the binary being globally installed on the host PATH
+            const localBin = path.join(agentDir, "node_modules", ".bin", process.platform === "win32" ? "agent-runtime.cmd" : "agent-runtime");
+            const localBinExists = await fs.pathExists(localBin);
+            const startCmd = localBinExists ? localBin : "agent-runtime";
 
             const containerId = generateId();
             const containerDir = resolveContainerPath(containerId);
@@ -420,6 +489,9 @@ agentCommand
 
                 const pid = await spawnProcess(containerId, agentDir, startCmd, agentEnv);
 
+                // parse instance_id from run_id (format: run_{userId}_{instanceId}_{container_id})
+                const instance_id = parseInt(run_id.split("_")[2], 10);
+
                 const containers = await loadContainers();
                 if (alias && Object.values(containers as Record<string, any>).some(c => c.alias === alias)) {
                     throw new Error(`Container name '${sanitizeLog(alias)}' is already in use`);
@@ -434,6 +506,7 @@ agentCommand
                     startedAt: Date.now(),
                     status: "running",
                     run_id,
+                    instance_id,
                 };
                 await saveContainers(containers);
 
@@ -462,17 +535,15 @@ agentCommand
 
             const agentDir = agentPath(container.name, container.version);
 
-            // call SaaS to register new run and get fresh ctx
-            console.log("🔗 Registering agent run with SaaS...");
-            const runRes = await apiAi.post("/agents/run", {
-                agent_name: container.name,
-                agent_version: container.version,
+            // reuse existing instance row — call /restart instead of /run
+            console.log("🔗 Registering agent restart with SaaS...");
+            const runRes = await apiAi.post("/agents/restart", {
+                instance_id: container.instance_id,
                 container_id: containerId,
                 hostname: os.hostname(),
-                alias: container.alias ?? null,
             });
             const runData = runRes.data;
-            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent run");
+            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent restart");
 
             const { ctx } = runData;
             const run_id: string = ctx.meta.run_id;
@@ -487,7 +558,9 @@ agentCommand
             };
 
             await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {});
-            const pid = await spawnProcess(containerId, agentDir, "agent-runtime", agentEnv);
+            const localBinStart = path.join(agentDir, "node_modules", ".bin", process.platform === "win32" ? "agent-runtime.cmd" : "agent-runtime");
+            const startCmdStart = await fs.pathExists(localBinStart) ? localBinStart : "agent-runtime";
+            const pid = await spawnProcess(containerId, agentDir, startCmdStart, agentEnv);
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
@@ -539,6 +612,18 @@ async function stopContainer(containerId: string): Promise<void> {
     });
     containers[containerId].status = "stopped";
     await saveContainers(containers);
+
+    // notify server — lifectl is responsible for this on platforms where SIGTERM
+    // handlers may not run (e.g. Windows), and as a reliable fallback on all platforms
+    const run_id = container.run_id;
+    if (run_id) {
+        try {
+            await apiAi.post("/agents/stopped", { run_id, last_error: null });
+        } catch {
+            // best-effort — server will eventually mark offline via heartbeat timeout
+        }
+    }
+
     console.log(`✅ Container '${sanitizeLog(containerId)}' stopped`);
 }
 
@@ -585,17 +670,15 @@ agentCommand
             const container = containers[containerId];
             const agentDir = agentPath(container.name, container.version);
 
-            // call SaaS to register new run and get fresh ctx
-            console.log("🔗 Registering agent run with SaaS...");
-            const runRes = await apiAi.post("/agents/run", {
-                agent_name: container.name,
-                agent_version: container.version,
+            // reuse existing instance row — call /restart instead of /run
+            console.log("🔗 Registering agent restart with SaaS...");
+            const runRes = await apiAi.post("/agents/restart", {
+                instance_id: container.instance_id,
                 container_id: containerId,
                 hostname: os.hostname(),
-                alias: container.alias ?? null,
             });
             const runData = runRes.data;
-            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent run");
+            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent restart");
 
             const { ctx } = runData;
             const run_id: string = ctx.meta.run_id;
@@ -609,7 +692,9 @@ agentCommand
                 AGENT_REFRESH_TOKEN: cfg?.refresh_token ?? "",
             };
 
-            const pid = await spawnProcess(containerId, agentDir, "agent-runtime", agentEnv);
+            const localBinRestart = path.join(agentDir, "node_modules", ".bin", process.platform === "win32" ? "agent-runtime.cmd" : "agent-runtime");
+            const startCmdRestart = await fs.pathExists(localBinRestart) ? localBinRestart : "agent-runtime";
+            const pid = await spawnProcess(containerId, agentDir, startCmdRestart, agentEnv);
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
