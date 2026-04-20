@@ -547,7 +547,12 @@ agentCommand
                 hostname: os.hostname(),
             });
             const runData = runRes.data;
-            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent restart");
+            if (!runData.success) {
+                if (runData.expired) {
+                    throw new Error(`Instance has expired after inactivity.\nRun 'lifectl ai agent run ${sanitizeLog(container.name)}' to create a new instance.`);
+                }
+                throw new Error(runData.message ?? "Failed to register agent restart");
+            }
 
             const { ctx } = runData;
             const run_id: string = ctx.meta.run_id;
@@ -686,7 +691,12 @@ agentCommand
                 hostname: os.hostname(),
             });
             const runData = runRes.data;
-            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent restart");
+            if (!runData.success) {
+                if (runData.expired) {
+                    throw new Error(`Instance has expired after inactivity.\nRun 'lifectl ai agent run ${sanitizeLog(container.name)}' to create a new instance.`);
+                }
+                throw new Error(runData.message ?? "Failed to register agent restart");
+            }
 
             const { ctx } = runData;
             const run_id: string = ctx.meta.run_id;
@@ -780,6 +790,21 @@ agentCommand
             const container = containers[containerId];
             if (!container) throw new Error(`Container '${sanitizeLog(containerId)}' not found`);
             if (isProcessAlive(container.pid)) throw new Error(`Container '${sanitizeLog(containerId)}' is running. Stop it first.`);
+
+            // notify SaaS to delete instance from D1 and clear DO storage
+            const run_id = container.run_id;
+            if (run_id) {
+                try {
+                    const res = await apiAi.delete("/agents/instance", { data: { run_id } });
+                    if (!res.data.success) {
+                        console.warn(`⚠️  SaaS remove failed: ${res.data.message ?? 'unknown error'}`);
+                    }
+                } catch {
+                    // best-effort — local cleanup proceeds regardless
+                    console.warn("⚠️  Could not notify SaaS (offline?), removing locally only");
+                }
+            }
+
             await fs.remove(resolveContainerPath(containerId));
             delete containers[containerId];
             await saveContainers(containers);
