@@ -536,9 +536,13 @@ agentCommand
             const agentDir = agentPath(container.name, container.version);
 
             // reuse existing instance row — call /restart instead of /run
+            // instance_id may not exist in older containers.json — parse from run_id as fallback
+            const instance_id_start = container.instance_id ?? parseInt((container.run_id ?? "").split("_")[2], 10);
+            if (!instance_id_start || !Number.isFinite(instance_id_start)) throw new Error("Cannot determine instance_id — try running a new container with 'lifectl ai agent run'");
+
             console.log("🔗 Registering agent restart with SaaS...");
             const runRes = await apiAi.post("/agents/restart", {
-                instance_id: container.instance_id,
+                instance_id: instance_id_start,
                 container_id: containerId,
                 hostname: os.hostname(),
             });
@@ -671,9 +675,13 @@ agentCommand
             const agentDir = agentPath(container.name, container.version);
 
             // reuse existing instance row — call /restart instead of /run
+            // instance_id may not exist in older containers.json — parse from run_id as fallback
+            const instance_id_restart = container.instance_id ?? parseInt((container.run_id ?? "").split("_")[2], 10);
+            if (!instance_id_restart || !Number.isFinite(instance_id_restart)) throw new Error("Cannot determine instance_id — try running a new container with 'lifectl ai agent run'");
+
             console.log("🔗 Registering agent restart with SaaS...");
             const runRes = await apiAi.post("/agents/restart", {
-                instance_id: container.instance_id,
+                instance_id: instance_id_restart,
                 container_id: containerId,
                 hostname: os.hostname(),
             });
