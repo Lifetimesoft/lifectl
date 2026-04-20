@@ -799,9 +799,14 @@ agentCommand
                     if (!res.data.success) {
                         console.warn(`⚠️  SaaS remove failed: ${res.data.message ?? 'unknown error'}`);
                     }
-                } catch {
-                    // best-effort — local cleanup proceeds regardless
-                    console.warn("⚠️  Could not notify SaaS (offline?), removing locally only");
+                } catch (e: any) {
+                    // 404 = instance already deleted from SaaS (TTL expired or removed manually) — ok to proceed
+                    if (e?.response?.status === 404) {
+                        // instance not found on SaaS — already gone, proceed with local cleanup
+                    } else {
+                        // best-effort — local cleanup proceeds regardless
+                        console.warn("⚠️  Could not notify SaaS (offline?), removing locally only");
+                    }
                 }
             }
 
