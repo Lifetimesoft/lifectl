@@ -26,7 +26,9 @@
         "cli",
         "ai",
         "agent",
-        "automation"
+        "automation",
+        "lifetimesoft",
+        "saas"
     ],
     "author": "LifetimeSoft <admin@lifetimesoft.com>",
     "license": "Apache-2.0",

@@ -536,14 +536,23 @@ agentCommand
             const agentDir = agentPath(container.name, container.version);
 
             // reuse existing instance row — call /restart instead of /run
+            // instance_id may not exist in older containers.json — parse from run_id as fallback
+            const instance_id_start = container.instance_id ?? parseInt((container.run_id ?? "").split("_")[2], 10);
+            if (!instance_id_start || !Number.isFinite(instance_id_start)) throw new Error("Cannot determine instance_id — try running a new container with 'lifectl ai agent run'");
+
             console.log("🔗 Registering agent restart with SaaS...");
             const runRes = await apiAi.post("/agents/restart", {
-                instance_id: container.instance_id,
+                instance_id: instance_id_start,
                 container_id: containerId,
                 hostname: os.hostname(),
             });
             const runData = runRes.data;
-            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent restart");
+            if (!runData.success) {
+                if (runData.expired) {
+                    throw new Error(`Instance has expired after inactivity.\nRun 'lifectl ai agent run ${sanitizeLog(container.name)}' to create a new instance.`);
+                }
+                throw new Error(runData.message ?? "Failed to register agent restart");
+            }
 
             const { ctx } = runData;
             const run_id: string = ctx.meta.run_id;
@@ -671,14 +680,23 @@ agentCommand
             const agentDir = agentPath(container.name, container.version);
 
             // reuse existing instance row — call /restart instead of /run
+            // instance_id may not exist in older containers.json — parse from run_id as fallback
+            const instance_id_restart = container.instance_id ?? parseInt((container.run_id ?? "").split("_")[2], 10);
+            if (!instance_id_restart || !Number.isFinite(instance_id_restart)) throw new Error("Cannot determine instance_id — try running a new container with 'lifectl ai agent run'");
+
             console.log("🔗 Registering agent restart with SaaS...");
             const runRes = await apiAi.post("/agents/restart", {
-                instance_id: container.instance_id,
+                instance_id: instance_id_restart,
                 container_id: containerId,
                 hostname: os.hostname(),
             });
             const runData = runRes.data;
-            if (!runData.success) throw new Error(runData.message ?? "Failed to register agent restart");
+            if (!runData.success) {
+                if (runData.expired) {
+                    throw new Error(`Instance has expired after inactivity.\nRun 'lifectl ai agent run ${sanitizeLog(container.name)}' to create a new instance.`);
+                }
+                throw new Error(runData.message ?? "Failed to register agent restart");
+            }
 
             const { ctx } = runData;
             const run_id: string = ctx.meta.run_id;
@@ -711,14 +729,32 @@ agentCommand
 // rma — remove a pulled agent (like docker rmi)
 agentCommand
     .command("rma <name>")
-    .description("Remove a pulled agent")
+    .description("Remove a pulled agent (accepts name, name:version, or agent ID)")
     .action(async (nameArg: string) => {
         try {
-            const [rawName, versionArg] = nameArg.split(":");
+            const registry = await loadRegistry();
+            const registryFile = path.join(AGENTS_DIR, "registry.json");
+
+            // resolve agent ID → name[:version] if the argument looks like an ID (12-char hex)
+            let resolvedArg = nameArg;
+            if (/^[a-f0-9]{12}$/.test(nameArg)) {
+                let found: { name: string; version: string } | null = null;
+                for (const [agentName, entry] of Object.entries(registry as Record<string, any>)) {
+                    for (const [ver, info] of Object.entries(entry.versions ?? {} as Record<string, any>)) {
+                        if ((info as any).agentId === nameArg) {
+                            found = { name: agentName, version: ver };
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+                if (!found) throw new Error(`Agent '${sanitizeLog(nameArg)}' not found`);
+                resolvedArg = `${found.name}:${found.version}`;
+            }
+
+            const [rawName, versionArg] = resolvedArg.split(":");
             const name = sanitizeName(rawName);
 
-            const registryFile = path.join(AGENTS_DIR, "registry.json");
-            const registry = await loadRegistry();
             if (!registry[name]) throw new Error(`Agent '${sanitizeLog(name)}' not found`);
 
             const allContainers = await loadContainers();
@@ -748,8 +784,7 @@ agentCommand
             let changed = false;
             for (const [cid, c] of Object.entries(allContainers as Record<string, any>)) {
                 if (c.name === name && (!versionArg || c.version === versionArg) && !isProcessAlive(c.pid)) {
-                    await fs.remove(resolveContainerPath(cid)).catch(() => {
-                    });
+                    await fs.remove(resolveContainerPath(cid)).catch(() => {});
                     delete allContainers[cid];
                     changed = true;
                 }
@@ -772,6 +807,26 @@ agentCommand
             const container = containers[containerId];
             if (!container) throw new Error(`Container '${sanitizeLog(containerId)}' not found`);
             if (isProcessAlive(container.pid)) throw new Error(`Container '${sanitizeLog(containerId)}' is running. Stop it first.`);
+
+            // notify SaaS to delete instance from D1 and clear DO storage
+            const run_id = container.run_id;
+            if (run_id) {
+                try {
+                    const res = await apiAi.delete("/agents/instance", { data: { run_id } });
+                    if (!res.data.success) {
+                        console.warn(`⚠️  SaaS remove failed: ${res.data.message ?? 'unknown error'}`);
+                    }
+                } catch (e: any) {
+                    // 404 = instance already deleted from SaaS (TTL expired or removed manually) — ok to proceed
+                    if (e?.response?.status === 404) {
+                        // instance not found on SaaS — already gone, proceed with local cleanup
+                    } else {
+                        // best-effort — local cleanup proceeds regardless
+                        console.warn("⚠️  Could not notify SaaS (offline?), removing locally only");
+                    }
+                }
+            }
+
             await fs.remove(resolveContainerPath(containerId));
             delete containers[containerId];
             await saveContainers(containers);
