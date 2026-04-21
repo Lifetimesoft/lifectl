@@ -729,14 +729,32 @@ agentCommand
 // rma — remove a pulled agent (like docker rmi)
 agentCommand
     .command("rma <name>")
-    .description("Remove a pulled agent")
+    .description("Remove a pulled agent (accepts name, name:version, or agent ID)")
     .action(async (nameArg: string) => {
         try {
-            const [rawName, versionArg] = nameArg.split(":");
+            const registry = await loadRegistry();
+            const registryFile = path.join(AGENTS_DIR, "registry.json");
+
+            // resolve agent ID → name[:version] if the argument looks like an ID (12-char hex)
+            let resolvedArg = nameArg;
+            if (/^[a-f0-9]{12}$/.test(nameArg)) {
+                let found: { name: string; version: string } | null = null;
+                for (const [agentName, entry] of Object.entries(registry as Record<string, any>)) {
+                    for (const [ver, info] of Object.entries(entry.versions ?? {} as Record<string, any>)) {
+                        if ((info as any).agentId === nameArg) {
+                            found = { name: agentName, version: ver };
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+                if (!found) throw new Error(`Agent '${sanitizeLog(nameArg)}' not found`);
+                resolvedArg = `${found.name}:${found.version}`;
+            }
+
+            const [rawName, versionArg] = resolvedArg.split(":");
             const name = sanitizeName(rawName);
 
-            const registryFile = path.join(AGENTS_DIR, "registry.json");
-            const registry = await loadRegistry();
             if (!registry[name]) throw new Error(`Agent '${sanitizeLog(name)}' not found`);
 
             const allContainers = await loadContainers();
@@ -766,8 +784,7 @@ agentCommand
             let changed = false;
             for (const [cid, c] of Object.entries(allContainers as Record<string, any>)) {
                 if (c.name === name && (!versionArg || c.version === versionArg) && !isProcessAlive(c.pid)) {
-                    await fs.remove(resolveContainerPath(cid)).catch(() => {
-                    });
+                    await fs.remove(resolveContainerPath(cid)).catch(() => {});
                     delete allContainers[cid];
                     changed = true;
                 }

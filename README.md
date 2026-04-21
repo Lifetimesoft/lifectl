@@ -35,6 +35,8 @@ lifectl ai agent run hello-world-agent
 lifectl ai agent ps
 ```
 
+![lifectl ai agent demo](assets/lifectl-ai-agent-01.gif)
+
 ---
 
 ## 🧩 CLI Structure
@@ -70,6 +72,7 @@ lifectl ai agent push                 # Push agent to registry
 lifectl ai agent list                 # List pulled agents
 lifectl ai agent rma <name>           # Remove agent (all versions)
 lifectl ai agent rma <name>:<ver>     # Remove specific version
+lifectl ai agent rma <agentId>        # Remove by agent ID (from list)
 ```
 
 ---
@@ -203,8 +206,10 @@ Upcoming apps:
 * [x] Auto package manager detection (bun/pnpm/yarn/npm)
 * [x] SaaS integration (ctx, WebSocket heartbeat, lifecycle)
 * [x] WebSocket Hibernation for agent heartbeat (near-zero cost)
-* [ ] SaaS dashboard integration
-* [ ] Multi-agent workflows
+* [x] Scheduler support (none / interval / cron) via agent-sdk
+* [x] Manual trigger and config hot-reload via platform dashboard
+* [x] SaaS dashboard integration
+* [x] Multi-agent workflows
 * [ ] Environment variables support
 * [ ] Sandbox execution
 
