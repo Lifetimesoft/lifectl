@@ -1,5 +1,5 @@
 import {Command} from "commander";
-import {execSync, spawn, spawnSync} from "child_process";
+import {execSync, spawn} from "child_process";
 import fs from "fs-extra";
 import path from "path";
 import os from "os";
@@ -9,14 +9,26 @@ import {apiAi} from "../utils/api-ai.js";
 import {minimatch} from "minimatch";
 import chokidar from "chokidar";
 import crypto from "crypto";
+import {getConfig} from "../utils/config.js";
 
 const AGENTS_DIR = path.join(os.homedir(), ".lifectl", "agents");
 const CONTAINERS_DIR = path.join(os.homedir(), ".lifectl", "containers");
 
-const ALLOWED_RUNTIMES = new Set(["node", "python", "python3", "deno", "bun", "npx", "ts-node", "tsx"]);
-
 const CONTAINER_ID_BYTES = 6;
 const CONTAINER_ID_REGEX = /^[a-f0-9]{12}$/; // CONTAINER_ID_BYTES * 2
+
+/**
+ * Detect the package manager to use for installing dependencies.
+ * Priority: bun > pnpm > yarn > npm (fallback)
+ * Handles repos that have multiple lock files (e.g. yarn.lock + package-lock.json).
+ */
+async function detectPackageManager(agentDir: string): Promise<{ bin: string; args: string[] }> {
+    if (await fs.pathExists(path.join(agentDir, "bun.lockb"))) return { bin: "bun", args: ["install"] };
+    if (await fs.pathExists(path.join(agentDir, "pnpm-lock.yaml"))) return { bin: "pnpm", args: ["install"] };
+    if (await fs.pathExists(path.join(agentDir, "yarn.lock"))) return { bin: "yarn", args: ["install"] };
+    if (await fs.pathExists(path.join(agentDir, "package-lock.json"))) return { bin: "npm", args: ["install"] };
+    return { bin: "npm", args: ["install"] }; // fallback
+}
 
 function generateId(): string {
     return crypto.randomBytes(CONTAINER_ID_BYTES).toString("hex");
@@ -35,12 +47,6 @@ function sanitizeContainerId(id: string): string {
 
 function sanitizeLog(s: string): string {
     return String(s).replace(/[\r\n]/g, " ");
-}
-
-function validateCmd(cmd: string): void {
-    if (/[;&|`$<>]/.test(cmd)) throw new Error("Invalid characters in script command");
-    const {bin} = parseCmd(cmd);
-    if (!ALLOWED_RUNTIMES.has(path.basename(bin))) throw new Error(`Command must start with an allowed runtime. Allowed: ${[...ALLOWED_RUNTIMES].join(", ")}`);
 }
 
 function parseCmd(cmd: string): { bin: string; args: string[] } {
@@ -278,7 +284,54 @@ async function rotateLog(logFile: string): Promise<void> {
     await fs.move(logFile, `${logFile}.1`, {overwrite: true});
 }
 
-async function spawnProcess(containerId: string, agentDir: string, startCmd: string): Promise<number> {
+/**
+ * On Windows, npm bin wrappers are .cmd files that cannot be spawned with detached:true.
+ * This resolves the actual JS file the .cmd points to so we can invoke it with node directly.
+ * Reads the target package's package.json "bin" field to find the JS entrypoint.
+ */
+function resolveNodeBinScript(cmdPath: string, agentDir: string): string | null {
+    try {
+        // e.g. cmdPath = ".../.bin/agent-runtime.cmd"  →  binName = "agent-runtime"
+        const binName = path.basename(cmdPath).replace(/\.cmd$/i, "");
+        const nmDir = path.join(agentDir, "node_modules");
+
+        // collect all package dirs to check (flat + scoped)
+        const pkgDirs: string[] = [];
+        for (const entry of fs.readdirSync(nmDir)) {
+            if (entry.startsWith(".")) continue;
+            const full = path.join(nmDir, entry);
+            if (entry.startsWith("@")) {
+                // scoped scope dir — add each package inside it
+                try {
+                    for (const scoped of fs.readdirSync(full)) {
+                        pkgDirs.push(path.join(full, scoped));
+                    }
+                } catch { /* skip */ }
+            } else {
+                pkgDirs.push(full);
+            }
+        }
+
+        for (const pkgDir of pkgDirs) {
+            const pkgJson = path.join(pkgDir, "package.json");
+            if (!fs.existsSync(pkgJson)) continue;
+            let pkg: any;
+            try { pkg = JSON.parse(fs.readFileSync(pkgJson, "utf-8")); } catch { continue; }
+            const binField = pkg.bin;
+            if (!binField) continue;
+            const binValue: string | undefined =
+                typeof binField === "string" ? binField : binField[binName];
+            if (!binValue) continue;
+            const jsPath = path.resolve(pkgDir, binValue);
+            if (fs.existsSync(jsPath)) return jsPath;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+async function spawnProcess(containerId: string, agentDir: string, startCmd: string, env?: Record<string, string>): Promise<number> {
     const containerDir = resolveContainerPath(containerId);
     const logFile = path.join(containerDir, "agent.log");
     const pidFile = path.join(containerDir, "agent.pid");
@@ -286,8 +339,32 @@ async function spawnProcess(containerId: string, agentDir: string, startCmd: str
     const logFd = fs.openSync(logFile, "a");
     let child;
     try {
-        const {bin: cmd, args} = parseCmd(startCmd);
-        child = spawn(cmd, args, {cwd: agentDir, detached: true, stdio: ["ignore", logFd, logFd]});
+        let bin: string;
+        let args: string[];
+        if (process.platform === "win32" && (startCmd.endsWith(".cmd") || startCmd.endsWith(".CMD"))) {
+            // On Windows, .cmd files cannot be spawned with detached:true directly.
+            // Resolve the actual JS entrypoint from the bin field in the package's package.json
+            // and invoke it with node instead.
+            const resolvedJs = resolveNodeBinScript(startCmd, agentDir);
+            if (resolvedJs) {
+                bin = process.execPath; // node
+                args = [resolvedJs];
+            } else {
+                // fallback: use cmd.exe /c (won't be truly detached but won't EINVAL)
+                bin = process.env.ComSpec ?? "cmd.exe";
+                args = ["/c", startCmd];
+            }
+        } else {
+            const parsed = parseCmd(startCmd);
+            bin = parsed.bin;
+            args = parsed.args;
+        }
+        child = spawn(bin, args, {
+            cwd: agentDir,
+            detached: true,
+            stdio: ["ignore", logFd, logFd],
+            env: {...process.env, ...env},
+        });
     } finally {
         fs.closeSync(logFd);
     }
@@ -333,56 +410,87 @@ agentCommand
             const agentJson = path.join(agentDir, "agent.json");
             const agent = await fs.readJson(agentJson);
 
-            const installCmd = agent.scripts?.install;
-            if (installCmd) {
-                const versionEntry = entry.versions[version];
-                if (!versionEntry.installedAt) {
-                    const lockFile = path.join(agentDir, ".install.lock");
-                    // atomic exclusive create — fails if another process already holds the lock
-                    let lockFd: number | null = null;
-                    try {
-                        lockFd = await fs.open(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
-                    } catch {
-                        // another instance is installing — wait for it to finish then skip
-                        console.log("⏳ Another instance is installing dependencies, waiting...");
-                        while (await fs.pathExists(lockFile)) {
-                            await new Promise(r => setTimeout(r, 500));
-                        }
-                        // re-read registry to check if install completed
-                        const freshRegistry = await loadRegistry();
-                        if (freshRegistry[name]?.versions[version]?.installedAt) {
-                            // already installed by the other instance
-                        } else {
-                            throw new Error("Install lock released but installedAt not set — install may have failed");
-                        }
-                        lockFd = null;
+            // require package.json — agent must use @lifetimesoft/agent-sdk
+            const pkgJsonPath = path.join(agentDir, "package.json");
+            if (!await fs.pathExists(pkgJsonPath)) {
+                throw new Error("Agent must have a package.json with @lifetimesoft/agent-sdk as a dependency.");
+            }
+
+            // install dependencies if not yet installed
+            if (!versionEntry.installedAt) {
+                const lockFile = path.join(agentDir, ".install.lock");
+                let lockFd: number | null = null;
+                try {
+                    lockFd = await fs.open(lockFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+                } catch {
+                    console.log("⏳ Another instance is installing dependencies, waiting...");
+                    while (await fs.pathExists(lockFile)) {
+                        await new Promise(r => setTimeout(r, 500));
                     }
-                    if (lockFd !== null) {
-                        try {
-                            validateCmd(installCmd);
-                            console.log("📦 Installing dependencies...");
-                            execSync(installCmd, {cwd: agentDir, stdio: "inherit", timeout: 5 * 60 * 1000});
-                            const registryFile = path.join(AGENTS_DIR, "registry.json");
-                            const registry = await loadRegistry();
-                            registry[name].versions[version].installedAt = Date.now();
-                            await fs.writeJson(registryFile, registry, {spaces: 2});
-                        } finally {
-                            await fs.close(lockFd);
-                            await fs.remove(lockFile).catch(() => {});
-                        }
+                    const freshRegistry = await loadRegistry();
+                    if (!freshRegistry[name]?.versions[version]?.installedAt) {
+                        throw new Error("Install lock released but installedAt not set — install may have failed");
+                    }
+                    lockFd = null;
+                }
+                if (lockFd !== null) {
+                    try {
+                        const pm = await detectPackageManager(agentDir);
+                        console.log(`📦 Installing dependencies with ${pm.bin}...`);
+                        execSync(`${pm.bin} ${pm.args.join(" ")}`, {cwd: agentDir, stdio: "inherit", timeout: 5 * 60 * 1000});
+                        const registryFile = path.join(AGENTS_DIR, "registry.json");
+                        const reg = await loadRegistry();
+                        reg[name].versions[version].installedAt = Date.now();
+                        await fs.writeJson(registryFile, reg, {spaces: 2});
+                    } finally {
+                        await fs.close(lockFd);
+                        await fs.remove(lockFile).catch(() => {});
                     }
                 }
             }
 
-            const startCmd = agent.scripts?.start;
-            if (!startCmd) throw new Error("No start script defined in agent.json");
-            validateCmd(startCmd);
+            // resolve agent-runtime from the agent's local node_modules/.bin so it works
+            // without the binary being globally installed on the host PATH
+            const localBin = path.join(agentDir, "node_modules", ".bin", process.platform === "win32" ? "agent-runtime.cmd" : "agent-runtime");
+            const localBinExists = await fs.pathExists(localBin);
+            const startCmd = localBinExists ? localBin : "agent-runtime";
 
             const containerId = generateId();
             const containerDir = resolveContainerPath(containerId);
             await fs.ensureDir(containerDir);
             try {
-                const pid = await spawnProcess(containerId, agentDir, startCmd);
+                // call SaaS to register run and get ctx + config
+                console.log("🔗 Registering agent run with SaaS...");
+                const runRes = await apiAi.post("/agents/run", {
+                    agent_name: name,
+                    agent_version: version,
+                    container_id: containerId,
+                    hostname: os.hostname(),
+                    alias: alias ?? null,
+                });
+                const runData = runRes.data;
+                if (!runData.success) throw new Error(runData.message ?? "Failed to register agent run");
+
+                const { ctx } = runData;
+                const run_id: string = ctx.meta.run_id;
+
+                // spawn agent using its own startCmd — each agent language/runtime uses its own command
+                // AGENT_CTX contains meta.runtime with heartbeat URLs from SaaS
+                // heartbeat is managed inside the agent process (via agent-sdk/runtime or equivalent)
+                const cfg = await getConfig();
+                const agentEnv: Record<string, string> = {
+                    AGENT_RUN_ID: run_id,
+                    AGENT_NAME: name,
+                    AGENT_VERSION: version,
+                    AGENT_CTX: JSON.stringify(ctx),
+                    AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+                    AGENT_REFRESH_TOKEN: cfg?.refresh_token ?? "",
+                };
+
+                const pid = await spawnProcess(containerId, agentDir, startCmd, agentEnv);
+
+                // parse instance_id from run_id (format: run_{userId}_{instanceId}_{container_id})
+                const instance_id = parseInt(run_id.split("_")[2], 10);
 
                 const containers = await loadContainers();
                 if (alias && Object.values(containers as Record<string, any>).some(c => c.alias === alias)) {
@@ -397,8 +505,11 @@ agentCommand
                     pid,
                     startedAt: Date.now(),
                     status: "running",
+                    run_id,
+                    instance_id,
                 };
                 await saveContainers(containers);
+
                 console.log(containerId);
             } catch (err) {
                 await fs.remove(containerDir).catch(() => {});
@@ -423,18 +534,46 @@ agentCommand
             if (isProcessAlive(container.pid)) throw new Error(`Container '${sanitizeLog(containerId)}' is already running`);
 
             const agentDir = agentPath(container.name, container.version);
-            const agentJson = path.join(agentDir, "agent.json");
-            const agent = await fs.readJson(agentJson);
-            const startCmd = agent.scripts?.start;
-            if (!startCmd) throw new Error("No start script defined in agent.json");
-            validateCmd(startCmd);
 
-            await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {
+            // reuse existing instance row — call /restart instead of /run
+            // instance_id may not exist in older containers.json — parse from run_id as fallback
+            const instance_id_start = container.instance_id ?? parseInt((container.run_id ?? "").split("_")[2], 10);
+            if (!instance_id_start || !Number.isFinite(instance_id_start)) throw new Error("Cannot determine instance_id — try running a new container with 'lifectl ai agent run'");
+
+            console.log("🔗 Registering agent restart with SaaS...");
+            const runRes = await apiAi.post("/agents/restart", {
+                instance_id: instance_id_start,
+                container_id: containerId,
+                hostname: os.hostname(),
             });
-            const pid = await spawnProcess(containerId, agentDir, startCmd);
+            const runData = runRes.data;
+            if (!runData.success) {
+                if (runData.expired) {
+                    throw new Error(`Instance has expired after inactivity.\nRun 'lifectl ai agent run ${sanitizeLog(container.name)}' to create a new instance.`);
+                }
+                throw new Error(runData.message ?? "Failed to register agent restart");
+            }
+
+            const { ctx } = runData;
+            const run_id: string = ctx.meta.run_id;
+            const cfg = await getConfig();
+            const agentEnv: Record<string, string> = {
+                AGENT_RUN_ID: run_id,
+                AGENT_NAME: container.name,
+                AGENT_VERSION: container.version,
+                AGENT_CTX: JSON.stringify(ctx),
+                AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+                AGENT_REFRESH_TOKEN: cfg?.refresh_token ?? "",
+            };
+
+            await fs.remove(resolveContainerPath(containerId, "agent.pid")).catch(() => {});
+            const localBinStart = path.join(agentDir, "node_modules", ".bin", process.platform === "win32" ? "agent-runtime.cmd" : "agent-runtime");
+            const startCmdStart = await fs.pathExists(localBinStart) ? localBinStart : "agent-runtime";
+            const pid = await spawnProcess(containerId, agentDir, startCmdStart, agentEnv);
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
+            containers[containerId].run_id = run_id;
             await saveContainers(containers);
             console.log(`✅ Container '${sanitizeLog(containerId)}' started (pid: ${pid})`);
         } catch (err: any) {
@@ -450,29 +589,6 @@ async function stopContainer(containerId: string): Promise<void> {
 
     const containerDir = resolveContainerPath(containerId);
     const pidFile = path.join(containerDir, "agent.pid");
-
-    // try stop script first
-    const agentDir = agentPath(container.name, container.version);
-    const agentJson = path.join(agentDir, "agent.json");
-    if (await fs.pathExists(agentJson)) {
-        const agent = await fs.readJson(agentJson);
-        const stopCmd = agent.scripts?.stop;
-        if (stopCmd) {
-            validateCmd(stopCmd);
-            const {bin, args} = parseCmd(stopCmd);
-            const pidData = await fs.readJson(pidFile).catch(() => null);
-            spawnSync(bin, args, {
-                cwd: agentDir,
-                stdio: "inherit",
-                env: {...process.env, AGENT_PID: String(pidData?.pid ?? ""), AGENT_CONTAINER_ID: containerId},
-            });
-            await fs.remove(pidFile).catch(() => {});
-            containers[containerId].status = "stopped";
-            await saveContainers(containers);
-            console.log(`✅ Container '${sanitizeLog(containerId)}' stopped`);
-            return;
-        }
-    }
 
     if (await fs.pathExists(pidFile)) {
         const pidData = await fs.readJson(pidFile);
@@ -505,6 +621,18 @@ async function stopContainer(containerId: string): Promise<void> {
     });
     containers[containerId].status = "stopped";
     await saveContainers(containers);
+
+    // notify server — lifectl is responsible for this on platforms where SIGTERM
+    // handlers may not run (e.g. Windows), and as a reliable fallback on all platforms
+    const run_id = container.run_id;
+    if (run_id) {
+        try {
+            await apiAi.post("/agents/stopped", { run_id, last_error: null });
+        } catch {
+            // best-effort — server will eventually mark offline via heartbeat timeout
+        }
+    }
+
     console.log(`✅ Container '${sanitizeLog(containerId)}' stopped`);
 }
 
@@ -550,16 +678,45 @@ agentCommand
             const containers = await loadContainers();
             const container = containers[containerId];
             const agentDir = agentPath(container.name, container.version);
-            const agentJson = path.join(agentDir, "agent.json");
-            const agent = await fs.readJson(agentJson);
-            const startCmd = agent.scripts?.start;
-            if (!startCmd) throw new Error("No start script defined in agent.json");
-            validateCmd(startCmd);
 
-            const pid = await spawnProcess(containerId, agentDir, startCmd);
+            // reuse existing instance row — call /restart instead of /run
+            // instance_id may not exist in older containers.json — parse from run_id as fallback
+            const instance_id_restart = container.instance_id ?? parseInt((container.run_id ?? "").split("_")[2], 10);
+            if (!instance_id_restart || !Number.isFinite(instance_id_restart)) throw new Error("Cannot determine instance_id — try running a new container with 'lifectl ai agent run'");
+
+            console.log("🔗 Registering agent restart with SaaS...");
+            const runRes = await apiAi.post("/agents/restart", {
+                instance_id: instance_id_restart,
+                container_id: containerId,
+                hostname: os.hostname(),
+            });
+            const runData = runRes.data;
+            if (!runData.success) {
+                if (runData.expired) {
+                    throw new Error(`Instance has expired after inactivity.\nRun 'lifectl ai agent run ${sanitizeLog(container.name)}' to create a new instance.`);
+                }
+                throw new Error(runData.message ?? "Failed to register agent restart");
+            }
+
+            const { ctx } = runData;
+            const run_id: string = ctx.meta.run_id;
+            const cfg = await getConfig();
+            const agentEnv: Record<string, string> = {
+                AGENT_RUN_ID: run_id,
+                AGENT_NAME: container.name,
+                AGENT_VERSION: container.version,
+                AGENT_CTX: JSON.stringify(ctx),
+                AGENT_ACCESS_TOKEN: cfg?.access_token ?? "",
+                AGENT_REFRESH_TOKEN: cfg?.refresh_token ?? "",
+            };
+
+            const localBinRestart = path.join(agentDir, "node_modules", ".bin", process.platform === "win32" ? "agent-runtime.cmd" : "agent-runtime");
+            const startCmdRestart = await fs.pathExists(localBinRestart) ? localBinRestart : "agent-runtime";
+            const pid = await spawnProcess(containerId, agentDir, startCmdRestart, agentEnv);
             containers[containerId].pid = pid;
             containers[containerId].startedAt = Date.now();
             containers[containerId].status = "running";
+            containers[containerId].run_id = run_id;
             await saveContainers(containers);
 
             console.log(`✅ Container '${sanitizeLog(containerId)}' restarted (pid: ${pid})`);
@@ -572,14 +729,32 @@ agentCommand
 // rma — remove a pulled agent (like docker rmi)
 agentCommand
     .command("rma <name>")
-    .description("Remove a pulled agent")
+    .description("Remove a pulled agent (accepts name, name:version, or agent ID)")
     .action(async (nameArg: string) => {
         try {
-            const [rawName, versionArg] = nameArg.split(":");
+            const registry = await loadRegistry();
+            const registryFile = path.join(AGENTS_DIR, "registry.json");
+
+            // resolve agent ID → name[:version] if the argument looks like an ID (12-char hex)
+            let resolvedArg = nameArg;
+            if (/^[a-f0-9]{12}$/.test(nameArg)) {
+                let found: { name: string; version: string } | null = null;
+                for (const [agentName, entry] of Object.entries(registry as Record<string, any>)) {
+                    for (const [ver, info] of Object.entries(entry.versions ?? {} as Record<string, any>)) {
+                        if ((info as any).agentId === nameArg) {
+                            found = { name: agentName, version: ver };
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+                if (!found) throw new Error(`Agent '${sanitizeLog(nameArg)}' not found`);
+                resolvedArg = `${found.name}:${found.version}`;
+            }
+
+            const [rawName, versionArg] = resolvedArg.split(":");
             const name = sanitizeName(rawName);
 
-            const registryFile = path.join(AGENTS_DIR, "registry.json");
-            const registry = await loadRegistry();
             if (!registry[name]) throw new Error(`Agent '${sanitizeLog(name)}' not found`);
 
             const allContainers = await loadContainers();
@@ -609,8 +784,7 @@ agentCommand
             let changed = false;
             for (const [cid, c] of Object.entries(allContainers as Record<string, any>)) {
                 if (c.name === name && (!versionArg || c.version === versionArg) && !isProcessAlive(c.pid)) {
-                    await fs.remove(resolveContainerPath(cid)).catch(() => {
-                    });
+                    await fs.remove(resolveContainerPath(cid)).catch(() => {});
                     delete allContainers[cid];
                     changed = true;
                 }
@@ -633,6 +807,26 @@ agentCommand
             const container = containers[containerId];
             if (!container) throw new Error(`Container '${sanitizeLog(containerId)}' not found`);
             if (isProcessAlive(container.pid)) throw new Error(`Container '${sanitizeLog(containerId)}' is running. Stop it first.`);
+
+            // notify SaaS to delete instance from D1 and clear DO storage
+            const run_id = container.run_id;
+            if (run_id) {
+                try {
+                    const res = await apiAi.delete("/agents/instance", { data: { run_id } });
+                    if (!res.data.success) {
+                        console.warn(`⚠️  SaaS remove failed: ${res.data.message ?? 'unknown error'}`);
+                    }
+                } catch (e: any) {
+                    // 404 = instance already deleted from SaaS (TTL expired or removed manually) — ok to proceed
+                    if (e?.response?.status === 404) {
+                        // instance not found on SaaS — already gone, proceed with local cleanup
+                    } else {
+                        // best-effort — local cleanup proceeds regardless
+                        console.warn("⚠️  Could not notify SaaS (offline?), removing locally only");
+                    }
+                }
+            }
+
             await fs.remove(resolveContainerPath(containerId));
             delete containers[containerId];
             await saveContainers(containers);

@@ -35,6 +35,8 @@ lifectl ai agent run hello-world-agent
 lifectl ai agent ps
 ```
 
+![lifectl ai agent demo](assets/lifectl-ai-agent-01.gif)
+
 ---
 
 ## 🧩 CLI Structure
@@ -70,6 +72,7 @@ lifectl ai agent push                 # Push agent to registry
 lifectl ai agent list                 # List pulled agents
 lifectl ai agent rma <name>           # Remove agent (all versions)
 lifectl ai agent rma <name>:<ver>     # Remove specific version
+lifectl ai agent rma <agentId>        # Remove by agent ID (from list)
 ```
 
 ---
@@ -132,11 +135,19 @@ c1e8f23a9d05  b7d2e45f1c08  hello-world-agent           1.0.0    ⚫ stopped  12
 
 ### Allowed runtimes
 
-Agents can only use these runtimes in `agent.json` scripts:
+Agents are started via `agent-runtime` (from `@lifetimesoft/agent-sdk`) automatically — no need to specify a start command in `agent.json`.
 
-```
-node  python  python3  deno  bun  npx  ts-node  tsx
-```
+Dependencies are installed automatically based on the lock file detected in the agent directory:
+
+| Lock file | Package manager |
+|---|---|
+| `bun.lockb` | `bun install` |
+| `pnpm-lock.yaml` | `pnpm install` |
+| `yarn.lock` | `yarn install` |
+| `package-lock.json` | `npm install` |
+| *(none)* | `npm install` (fallback) |
+
+If multiple lock files exist, the highest priority one wins.
 
 ---
 
@@ -192,8 +203,13 @@ Upcoming apps:
 * [x] Multi-container per agent
 * [x] Named containers
 * [x] Container filtering
-* [ ] SaaS dashboard integration
-* [ ] Multi-agent workflows
+* [x] Auto package manager detection (bun/pnpm/yarn/npm)
+* [x] SaaS integration (ctx, WebSocket heartbeat, lifecycle)
+* [x] WebSocket Hibernation for agent heartbeat (near-zero cost)
+* [x] Scheduler support (none / interval / cron) via agent-sdk
+* [x] Manual trigger and config hot-reload via platform dashboard
+* [x] SaaS dashboard integration
+* [x] Multi-agent workflows
 * [ ] Environment variables support
 * [ ] Sandbox execution
 
@@ -202,12 +218,11 @@ Upcoming apps:
 ## 🔐 Security
 
 * Token-based authentication
-* Runtime whitelist enforcement
 * Shell metacharacter blocking
 * Path traversal protection
 * PID validation before kill
 * PID reuse detection (Linux)
-* Atomic install lock (prevents concurrent install)
+* Atomic install lock (prevents concurrent installs)
 * Atomic container writes (prevents corruption)
 
 ---
@@ -240,6 +255,8 @@ Apache-2.0 license
 ## 🌐 Lifetimesoft
 
 Building tools for AI automation and agent-based systems.
+
+* [`@lifetimesoft/agent-sdk`](https://www.npmjs.com/package/@lifetimesoft/agent-sdk) – SDK for building portable AI agents
 
 ---
 
