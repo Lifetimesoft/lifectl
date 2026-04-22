@@ -7,7 +7,6 @@ import * as tar from "tar";
 import semver from "semver";
 import {apiAi} from "../utils/api-ai.js";
 import {minimatch} from "minimatch";
-import chokidar from "chokidar";
 import crypto from "crypto";
 import {getConfig} from "../utils/config.js";
 
@@ -390,7 +389,22 @@ agentCommand
     .option("--name <alias>", "Assign a name to the container")
     .action(async (nameArg: string, opts: { name?: string }) => {
         try {
-            const [rawName, versionArg] = nameArg.split(":");
+            // resolve agent ID → name[:version] if argument looks like an ID (12-char hex)
+            let resolvedArg = nameArg
+            if (/^[a-f0-9]{12}$/.test(nameArg)) {
+                const registry = await loadRegistry()
+                let found: { name: string; version: string } | null = null
+                for (const [agentName, entry] of Object.entries(registry as Record<string, any>)) {
+                    for (const [ver, info] of Object.entries(entry.versions ?? {} as Record<string, any>)) {
+                        if ((info as any).agentId === nameArg) { found = { name: agentName, version: ver }; break }
+                    }
+                    if (found) break
+                }
+                if (!found) throw new Error(`Agent '${sanitizeLog(nameArg)}' not found`)
+                resolvedArg = `${found.name}:${found.version}`
+            }
+
+            const [rawName, versionArg] = resolvedArg.split(":");
             const name = sanitizeName(rawName);
             const alias = opts.name ? sanitizeName(opts.name) : undefined;
 
@@ -524,14 +538,12 @@ agentCommand
 // start — start a stopped container
 agentCommand
     .command("start <containerId>")
-    .description("Start a stopped container")
+    .description("Start a stopped container (accepts container ID, alias, or agent name)")
     .action(async (rawId: string) => {
         try {
-            const containerId = sanitizeContainerId(rawId);
+            const containerId = await resolveStoppedContainerId(rawId.trim(), true);
             const containers = await loadContainers();
             const container = containers[containerId];
-            if (!container) throw new Error(`Container '${sanitizeLog(containerId)}' not found`);
-            if (isProcessAlive(container.pid)) throw new Error(`Container '${sanitizeLog(containerId)}' is already running`);
 
             const agentDir = agentPath(container.name, container.version);
 
@@ -648,6 +660,22 @@ async function resolveContainerId(nameOrId: string, requireSingle = false): Prom
     if (requireSingle && matches.length > 1) {
         const ids = matches.map(c => (c.containerId as string).slice(0, 12)).join(", ");
         throw new Error(`Multiple running containers found for '${sanitizeLog(nameOrId)}': ${ids}\nUse container id to specify which one.`);
+    }
+    return matches.sort((a, b) => b.startedAt - a.startedAt)[0].containerId;
+}
+
+async function resolveStoppedContainerId(nameOrId: string, requireSingle = false): Promise<string> {
+    const containers = await loadContainers();
+    // try exact container id match first (validate format), then fall back to name lookup
+    let isId = false;
+    try { sanitizeContainerId(nameOrId); isId = true; } catch { /* not an id format */ }
+    if (isId && containers[nameOrId]) return nameOrId;
+    const matches = Object.values(containers as Record<string, any>)
+        .filter(c => (c.alias === nameOrId || c.name === nameOrId) && !isProcessAlive(c.pid));
+    if (matches.length === 0) throw new Error(`No stopped container found for '${sanitizeLog(nameOrId)}'\nUse 'lifectl ai agent ps' to list containers.`);
+    if (requireSingle && matches.length > 1) {
+        const ids = matches.map(c => (c.containerId as string).slice(0, 12)).join(", ");
+        throw new Error(`Multiple stopped containers found for '${sanitizeLog(nameOrId)}': ${ids}\nUse container id to specify which one.`);
     }
     return matches.sort((a, b) => b.startedAt - a.startedAt)[0].containerId;
 }
@@ -799,13 +827,12 @@ agentCommand
 // rm — remove a stopped container
 agentCommand
     .command("rm <containerId>")
-    .description("Remove a stopped container")
+    .description("Remove a stopped container (accepts container ID, alias, or agent name)")
     .action(async (rawId: string) => {
         try {
-            const containerId = sanitizeContainerId(rawId);
+            const containerId = await resolveStoppedContainerId(rawId.trim(), true);
             const containers = await loadContainers();
             const container = containers[containerId];
-            if (!container) throw new Error(`Container '${sanitizeLog(containerId)}' not found`);
             if (isProcessAlive(container.pid)) throw new Error(`Container '${sanitizeLog(containerId)}' is running. Stop it first.`);
 
             // notify SaaS to delete instance from D1 and clear DO storage
@@ -881,12 +908,19 @@ agentCommand
 // ps — like docker ps
 agentCommand
     .command("ps")
-    .description("List running agent containers (like docker ps)")
+    .description("List agent containers (like docker ps)")
+    .option("-a, --all", "Show all containers (default: running only)")
     .option("--name <name>", "Filter by agent name or container alias")
     .option("--status <status>", "Filter by status: running | stopped")
-    .action(async (opts: { name?: string; status?: string }) => {
+    .action(async (opts: { all?: boolean; name?: string; status?: string }) => {
         const containers = await loadContainers();
         let all = Object.values(containers as Record<string, any>);
+
+        // default: show running only (like docker ps), unless -a or --status is specified
+        if (!opts.all && !opts.status) {
+            all = all.filter(c => Number.isFinite(c.pid) && c.pid > 0 && isProcessAlive(c.pid));
+        }
+
         if (opts.name) {
             const filter = opts.name.trim();
             all = all.filter(c => c.name === filter || c.alias === filter);
@@ -999,24 +1033,24 @@ agentCommand
             if (tailLines) process.stdout.write(tailLines + "\n");
 
             const containerDir = resolveContainerPath(containerId);
-            // watch the directory so we detect when logFile is recreated after rotation
-            const watcher = chokidar.watch(containerDir, {
-                usePolling: false,
-                persistent: true,
-                ignoreInitial: true,
-                depth: 0,
-            });
-            watcher.on("add", (filePath) => {
-                // logFile was recreated after rotation — reset position
-                if (filePath === logFile) lastSize = 0;
-            });
-            watcher.on("change", async (filePath) => {
-                if (filePath !== logFile) return;
+            // poll log file for new content every 500ms — reliable across all platforms
+            // (chokidar fs events are unreliable for files written by other processes on Windows)
+            let currentLogFile = logFile;
+
+            const poll = setInterval(async () => {
                 try {
-                    const size = (await fs.stat(logFile)).size;
-                    if (size < lastSize) lastSize = 0; // file was truncated/rotated
+                    // detect log rotation — new file created, old one renamed
+                    if (!await fs.pathExists(currentLogFile)) {
+                        if (await fs.pathExists(logFile)) {
+                            currentLogFile = logFile;
+                            lastSize = 0;
+                        }
+                        return;
+                    }
+                    const size = (await fs.stat(currentLogFile)).size;
+                    if (size < lastSize) lastSize = 0; // truncated/rotated
                     if (size > lastSize) {
-                        const rfd = await fs.open(logFile, "r");
+                        const rfd = await fs.open(currentLogFile, "r");
                         const buf = Buffer.alloc(size - lastSize);
                         await fs.read(rfd, buf, 0, buf.length, lastSize);
                         await fs.close(rfd);
@@ -1024,26 +1058,25 @@ agentCommand
                         lastSize = size;
                     }
                 } catch {
-                    watcher.close();
+                    // file temporarily unavailable during rotation — retry next tick
                 }
-            });
+            }, 500);
 
-            // poll process liveness — close watcher when the agent dies
+            // keep polling even when agent dies — same behavior as docker logs -f
+            // user exits manually with Ctrl+C
             const containers = await loadContainers();
             const containerMeta = containers[containerId];
             if (containerMeta?.pid) {
                 const aliveInterval = setInterval(() => {
                     if (!isProcessAlive(containerMeta.pid)) {
                         clearInterval(aliveInterval);
-                        watcher.close();
-                        process.exit(0);
+                        // don't exit — keep tailing in case agent restarts or user wants to read remaining logs
                     }
                 }, 2000);
-                watcher.on("close", () => clearInterval(aliveInterval));
             }
 
             process.on("SIGINT", () => {
-                watcher.close();
+                clearInterval(poll);
                 process.exit(0);
             });
         } catch (err: any) {

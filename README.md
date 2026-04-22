@@ -82,17 +82,19 @@ lifectl ai agent rma <agentId>        # Remove by agent ID (from list)
 ```bash
 lifectl ai agent run <name>                      # Run agent (pull if needed)
 lifectl ai agent run <name>:<ver>                # Run specific version
+lifectl ai agent run <agentId>                   # Run by agent ID
 lifectl ai agent run <name> --name <alias>       # Run with a custom container name
 
-lifectl ai agent ps                              # List all containers
+lifectl ai agent ps                              # List running containers
+lifectl ai agent ps -a                           # List all containers (running + stopped)
 lifectl ai agent ps --name <name>                # Filter by agent name or alias
 lifectl ai agent ps --status running             # Filter by status
 lifectl ai agent ps --name <name> --status stopped
 
-lifectl ai agent start <containerId>             # Start a stopped container
+lifectl ai agent start <containerId|alias|name>  # Start a stopped container
 lifectl ai agent stop <name|alias|containerId>   # Stop a container
 lifectl ai agent restart <name|alias|containerId># Restart a container
-lifectl ai agent rm <containerId>                # Remove a stopped container
+lifectl ai agent rm <containerId|alias|name>     # Remove a stopped container
 
 lifectl ai agent logs <name|alias|containerId>   # Show logs
 lifectl ai agent logs <name> -n 100              # Show last N lines
