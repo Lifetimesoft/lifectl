@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.6] - 2026-04-23
+
+### Fixed
+
+- **WebSocket connectivity** — resolved multiple WebSocket connection issues that prevented agents from maintaining persistent connections to the platform
+  - Fixed missing WebSocket dependencies (`ws`, `@types/ws`) in agent-sdk
+  - Fixed middleware routing for WebSocket upgrade requests in app-main
+  - Fixed AuthCli middleware blocking WebSocket upgrade requests (now detects `Upgrade: websocket` header)
+  - Added proper WebSocket route handling in app-main (`GET /cli/*`)
+- **Agent configuration updates** — fixed issue where agent config changes from the platform UI weren't being sent to running agents
+  - Fixed config update WebSocket messages to send full config object instead of just scheduler config
+  - Agents now properly reload configuration when changed through the platform dashboard
+- **Cron expression validation** — fixed UI validation issues with cron expressions containing step syntax
+  - Fixed parsing of expressions like `*/5` (every 5 units) in platform UI
+  - Added support for both 5-field and 6-field cron expressions in UI validation
+  - Improved cron description text (e.g., "every 5 hours" instead of "at */5:00")
+
+### Enhanced
+
+- **Error handling** — improved error messages for WebSocket connection failures and cron validation
+- **Logging** — cleaned up debug logs from production deployments while maintaining essential error logging
+
+---
+
 ## [0.0.5] - 2026-04-21
 
 ### Added
