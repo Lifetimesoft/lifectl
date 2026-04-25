@@ -160,10 +160,14 @@ async function loadRegistry(): Promise<Record<string, any>> {
     return registry;
 }
 
-async function pullAgent(name: string): Promise<void> {
+async function pullAgent(name: string, version?: string): Promise<void> {
     const tmpFile = path.join(os.tmpdir(), `agent-${Date.now()}.tar.gz`);
     try {
-        const response = await apiAi.post("/agents/pull", {name}, {responseType: "arraybuffer"});
+        const payload: any = {name};
+        if (version) {
+            payload.version = version;
+        }
+        const response = await apiAi.post("/agents/pull", payload, {responseType: "arraybuffer"});
         await fs.writeFile(tmpFile, Buffer.from(response.data));
         const agentVersion = sanitizeName(String(response.headers["x-agent-version"] ?? "unknown"));
         const agentDir = agentPath(name, agentVersion);
@@ -257,10 +261,11 @@ agentCommand
 // pull
 agentCommand
     .command("pull <name>")
-    .description("Pull agent from registry")
+    .description("Pull agent from registry (supports name or name:version)")
     .action(async (rawName: string) => {
         try {
-            await pullAgent(sanitizeName(rawName));
+            const [name, version] = rawName.split(":");
+            await pullAgent(sanitizeName(name), version ? sanitizeName(version) : undefined);
         } catch (err: any) {
             console.error("❌ Pull failed:", err.message);
             process.exit(1);
