@@ -28,52 +28,60 @@ apiAi.interceptors.response.use(
         if (res.config.responseType === "arraybuffer" && Buffer.isBuffer(data)) {
             try {
                 data = JSON.parse(data.toString("utf-8"));
-                console.log('parse arraybuffer: ', data)
             } catch {
                 return res;
             }
         }
 
-        if (data?.code === 401) {
+        // app-main AuthCli always returns HTTP 200 with body:
+        //   { code: 401, success: false } → invalid token (bad signature)
+        //   { code: 406, success: false } → expired token
+        // Both cases require a token refresh + retry
+        const needsRefresh = data?.code === 401 || data?.code === 406;
+
+        if (needsRefresh && !(res.config as any).__retried) {
             const cfg = await getConfig();
 
             if (!cfg?.refresh_token) {
-                return Promise.reject(new Error("Unauthorized"));
+                return Promise.reject(new Error("Unauthorized — no refresh token available"));
             }
 
-            console.log('start call refresh token...')
-            const refreshRes = await axios.post(`${APP_URL}/cli-login/refresh`, {
-                access_token: cfg.access_token,
-                refresh_token: cfg.refresh_token
-            }, {
-                headers: {
-                    "X-Requested-With": "lifectl-cli"
+            try {
+                const refreshRes = await axios.post(`${APP_URL}/cli-login/refresh`, {
+                    access_token: cfg.access_token,
+                    refresh_token: cfg.refresh_token
+                }, {
+                    headers: { "X-Requested-With": "lifectl-cli" }
+                });
+
+                if (!refreshRes.data.success) {
+                    return Promise.reject(new Error("Session expired — please run 'lifectl auth login'"));
                 }
-            });
 
-            console.log('end call refresh token...')
-            let accessToken = refreshRes.data.access_token
+                const accessToken = refreshRes.data.access_token;
+                await saveConfig({
+                    ...cfg,
+                    access_token: accessToken,
+                    refresh_token: refreshRes.data.refresh_token ?? cfg.refresh_token,
+                });
 
-            await saveConfig({
-                access_token: accessToken,
-                refresh_token: refreshRes.data.refresh_token
-            });
-
-            res.config.headers.Authorization = `${accessToken}`;
-
-            console.log('call apiAi...')
-            return apiAi(res.config);
-        } else {
+                // retry original request with new token
+                (res.config as any).__retried = true;
+                res.config.headers.Authorization = `${accessToken}`;
+                return apiAi(res.config);
+            } catch (e: any) {
+                return Promise.reject(new Error(`Token refresh failed: ${e.message}`));
+            }
         }
 
-        if (data?.success === false) {
+        if (data?.success === false && !needsRefresh) {
             return Promise.reject(new Error(data.message || "Request failed"));
         }
 
         return res;
     },
     (error) => {
-        console.error(error)
-        return Promise.reject(error)
+        // HTTP-level errors (network, timeout, etc.)
+        return Promise.reject(error);
     }
 );
