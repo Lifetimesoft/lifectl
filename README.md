@@ -24,7 +24,7 @@
 ### Install
 
 ```bash
-npm install -g lifectl
+npm install -g @lifetimesoft/lifectl
 ```
 
 ### Run your first agent
@@ -212,7 +212,7 @@ Upcoming apps:
 * [x] Manual trigger and config hot-reload via platform dashboard
 * [x] SaaS dashboard integration
 * [x] Multi-agent workflows
-* [ ] Environment variables support
+* [x] Environment variables support
 * [ ] Sandbox execution
 
 ---
