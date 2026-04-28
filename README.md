@@ -1,4 +1,4 @@
-# lifectl
+# @lifetimesoft/lifectl
 
 > Run AI agents easily — powered by Lifetimesoft CLI platform.
 
