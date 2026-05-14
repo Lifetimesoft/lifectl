@@ -254,6 +254,34 @@ agentCommand
             const agentJson = path.join(process.cwd(), "agent.json");
             if (!await fs.pathExists(agentJson)) throw new Error("agent.json not found");
             const agent = await fs.readJson(agentJson);
+
+            // Auto-build before packing if package.json has a "build" script
+            const pkgJsonPath = path.join(process.cwd(), "package.json");
+            if (await fs.pathExists(pkgJsonPath)) {
+                const pkg = await fs.readJson(pkgJsonPath);
+                if (pkg?.scripts?.build) {
+                    const pm = await detectPackageManager(process.cwd());
+                    const buildCmd = pm.bin === "npm"  ? "npm run build"
+                                   : pm.bin === "bun"  ? "bun run build"
+                                   : pm.bin === "pnpm" ? "pnpm run build"
+                                   : "yarn build";
+                    console.log(`🔨 Building agent with: ${buildCmd}`);
+                    execSync(buildCmd, { cwd: process.cwd(), stdio: "inherit", timeout: 5 * 60 * 1000 });
+                }
+            }
+
+            // Verify entrypoint exists after build
+            const entrypoint = agent.main;
+            if (entrypoint) {
+                const entrypointPath = path.join(process.cwd(), entrypoint);
+                if (!await fs.pathExists(entrypointPath)) {
+                    throw new Error(
+                        `Entrypoint "${entrypoint}" not found after build. ` +
+                        `Make sure your build script outputs to the correct path.`
+                    );
+                }
+            }
+
             console.log("📦 Packing agent...");
             await tarDirectory(process.cwd(), zipPath);
             const zipBuffer = await fs.readFile(zipPath);
@@ -485,23 +513,9 @@ agentCommand
                 }
             }
 
-            // build if not yet built (only when package.json has a "build" script)
-            if (!versionEntry.builtAt) {
-                const pkg = await fs.readJson(pkgJsonPath);
-                if (pkg?.scripts?.build) {
-                    const pm = await detectPackageManager(agentDir);
-                    const buildCmd = pm.bin === "npm" ? "npm run build"
-                        : pm.bin === "bun"  ? "bun run build"
-                        : pm.bin === "pnpm" ? "pnpm run build"
-                        : "yarn build";
-                    console.log(`🔨 Building agent with: ${buildCmd}`);
-                    execSync(buildCmd, {cwd: agentDir, stdio: "inherit", timeout: 5 * 60 * 1000});
-                    const registryFile = path.join(AGENTS_DIR, "registry.json");
-                    const reg = await loadRegistry();
-                    reg[name].versions[version].builtAt = Date.now();
-                    await fs.writeJson(registryFile, reg, {spaces: 2});
-                }
-            }
+            // dist/index.js is already built and included in the tar.gz by "lifectl push".
+            // No build step needed here — only npm install is required to get node_modules
+            // (agent-runtime binary + external deps like playwright).
 
             // resolve agent-runtime from the agent's local node_modules/.bin so it works
             // without the binary being globally installed on the host PATH
