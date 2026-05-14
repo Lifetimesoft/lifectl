@@ -163,6 +163,23 @@ async function loadRegistry(): Promise<Record<string, any>> {
 async function pullAgent(name: string, version?: string): Promise<void> {
     const tmpFile = path.join(os.tmpdir(), `agent-${Date.now()}.tar.gz`);
     try {
+        // ── Check agent exists and is compatible with node host ──
+        const infoQuery = version
+            ? `/agents/info?name=${encodeURIComponent(name)}&version=${encodeURIComponent(version)}&host=node`
+            : `/agents/info?name=${encodeURIComponent(name)}&host=node`;
+        const infoRes = await apiAi.get(infoQuery);
+        const info = infoRes.data;
+
+        if (!info.success) {
+            throw new Error(info.message ?? `Agent "${sanitizeLog(name)}" not found`);
+        }
+        if (info.compatible === false) {
+            throw new Error(
+                `Agent "${sanitizeLog(name)}" is not compatible with this host. ` +
+                `Missing capabilities: ${(info.missing as string[]).join(", ")}.`
+            );
+        }
+
         const payload: any = {name};
         if (version) {
             payload.version = version;
